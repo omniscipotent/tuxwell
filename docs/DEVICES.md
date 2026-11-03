@@ -6,8 +6,9 @@ Tuxwell is built around one tested setup. **Everything else is untested, and hel
 
 | Device | USB ID | Status |
 |---|---|---|
-| Maxwell 2, Xbox dongle | `3329:4b28` | **Tested** (audio fixes, surround, presets) |
+| Maxwell 2 (non-ANC), Xbox dongle | `3329:4b28` | **Tested** (audio fixes, surround, presets) |
 | Maxwell 2, PlayStation / PC dongle | `3329:4b29`, `3329:4b2a` | Untested. Audio parts probably work; presets need confirming |
+| Maxwell 2 ANC | unknown | Untested (headphone correction data is for the non-ANC model) |
 | Maxwell 2 over USB-C (direct) | unknown | Untested |
 | Maxwell (1), dongles | `3329:4b18`, `3329:4b19`, `3329:4b1a`, `3329:4b1e` | Untested. Different firmware; preset bytes may differ |
 | Bluetooth | n/a | Not supported (this project is about the USB dongle) |

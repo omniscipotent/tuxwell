@@ -29,7 +29,8 @@ and does it only while the headset is powered on. Turn the headphones off and ev
 | **Per-app surround** | Chosen apps (Plex HTPC by default) go to surround automatically, and the default output follows playback: surround while Plex plays, stereo when you pause, with one volume across both. |
 | **Mic out of the way** | Optional playback-only profile, so the headset mic never gets picked as an input by mistake. |
 | **Follows the headset** | Detects the headset powering on and off, even with the dongle always plugged in. |
-| **Control panel** | A small GTK4 / libadwaita app with a tray icon (closing the window keeps it in the tray) for all of the above, plus the headset's sound preset (all 10: six built-in and four EQ slots), sidetone and game/chat mix. |
+| **Headphone correction** | Optional EQ that evens out the Maxwell's own sound so surround is more accurate. For the **Maxwell 2** it is generated from a published lab measurement (not guessed); off by default. See [data/eq/README.md](data/eq/README.md). |
+| **Control panel** | A GTK4 / libadwaita app with a tray icon (closing the window keeps it in the tray). Four tabs: **Listen** (output and volume), **Surround** (a 1-2-3 "find your sound" workflow), **Headset** (sound preset, sidetone, game/chat mix, battery) and **More** (options, help, and a one-click non-personal report for bug reports). |
 
 ## Install
 
@@ -68,6 +69,7 @@ These live inside the headset and need two things:
 | Key | Default | Meaning |
 |---|---|---|
 | `HW_VOLUME` | `86` | Dongle gain, 0 to 96 (1 step = 1 dB, 96 = loudest) |
+| `EQ` | `off` | Headphone correction for the surround output: `off`, or a profile id such as `maxwell2-neutral` (see `data/eq/catalog.tsv`). |
 | `HRTF` | `D1_48K_24bit_256tap_FIR_SOFA.sofa` | Head-response file in use. Change it with `tuxwell-hrtf use <id>` or in the app. |
 | `HIRES` | `1` | Allow 48 / 96 kHz switching |
 | `DISABLE_MIC` | `1` | Playback-only card profile |
@@ -102,8 +104,8 @@ sudo rm -f /etc/udev/rules.d/70-audeze-maxwell.rules   # if you installed it
 
 | | Status |
 |---|---|
-| Maxwell 2, Xbox dongle (`3329:4b28`) on Fedora 44 / GNOME / PipeWire | **Tested** |
-| Other Maxwell 2 dongles, Maxwell (1), USB-C direct | Untested, help wanted |
+| Maxwell 2 (non-ANC), Xbox dongle (`3329:4b28`) on Fedora 44 / GNOME / PipeWire | **Tested** |
+| Other Maxwell 2 dongles, Maxwell 2 ANC, Maxwell (1), USB-C direct | Untested, help wanted |
 | Other distros and desktops | Untested, help wanted |
 
 This started as one person's setup and is meant to grow. See [docs/DEVICES.md](docs/DEVICES.md) for what is device- and distro-specific,
@@ -113,6 +115,7 @@ and [CONTRIBUTING.md](CONTRIBUTING.md) to help. If you try it, please run `tuxwe
 
 - Preset changes are sent as a USB control `SET_REPORT`. Sent as a plain `hidraw` write, a Maxwell 2 only accepts values 1 to 4 (as EQ slots) and ignores the built-ins. See [docs/PRESETS.md](docs/PRESETS.md).
 - Surround only affects apps that send 5.1/7.1. Stereo content is not upmixed.
+- The Maxwell 2 correction comes from **one published measurement of one unit** and assumes the headset is on its default *Audeze* sound preset. Treat it as a good, data-based starting point and trust your ears.
 - No head tracking. See [maxwell-3d](https://github.com/TryCatch2022/maxwell-3d) if you have the Maxwell 2 ANC over USB-C.
 - Not affiliated with Audeze. See [SECURITY.md](SECURITY.md) for exactly what this installs and touches.
 

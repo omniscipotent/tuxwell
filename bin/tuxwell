@@ -4,7 +4,8 @@
 set -u
 umask 077
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/tuxwell.conf"
-SURROUND="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/surround.conf"
+DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/tuxwell"
+TEMPLATE="$DATA_ROOT/surround.conf.in"
 # defaults (override in tuxwell.conf)
 HW_VOLUME=86                    # dongle hardware PCM, 0-96 (1 step = 1 dB, 96 = 0 dB)
 RATES="48000 96000"
@@ -15,6 +16,7 @@ SURROUND_GAIN=0.27               # per-speaker gain; 0.27 makes centred stereo a
 CENTER_DB=3                      # extra dB on the centre channel, so 5.1 dialogue matches a stereo downmix
 SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
 HRTF=D1_48K_24bit_256tap_FIR_SOFA.sofa   # head-response file in ~/.local/share/tuxwell/hrtf (see tuxwell-hrtf)
+EQ=off                           # headphone correction applied to the surround output: off, or a profile id (see data/eq/catalog.tsv)
 AUTO_DEFAULT=1                   # 1 = the default output follows playback: surround while PLAYING_APPS plays, stereo otherwise
 PLAYING_APPS='plex-bin'          # regex for the player's own stream (not its menu/UI sounds)
 # Read the config as data, never as code: only known keys, only plain values.
@@ -29,6 +31,7 @@ if [ -f "$CONF" ]; then
       SURROUND_GAIN)    [[ $val =~ ^[0-9]*\.?[0-9]+$ ]] && awk "BEGIN{exit !($val > 0 && $val <= 1.5)}" && SURROUND_GAIN=$val ;;
       CENTER_DB)        [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 9)}" && CENTER_DB=$val ;;
       HRTF)             [[ $val =~ ^[A-Za-z0-9._-]+\.sofa$ ]] && HRTF=$val ;;
+      EQ)               [[ $val =~ ^(off|[a-z0-9-]+)$ ]] && EQ=$val ;;
       AUTO_DEFAULT)     [[ $val =~ ^[01]$ ]] && AUTO_DEFAULT=$val ;;
       PLAYING_APPS)     [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && PLAYING_APPS=$val ;;
       SURROUND_APPS)    [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && SURROUND_APPS=$val ;;
@@ -43,19 +46,25 @@ card_name() { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
 alsa_card() { awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null; }
 
 apply() {
-  local card n hrtf_path; card=$(card_name); n=$(alsa_card)
+  local card n; card=$(card_name); n=$(alsa_card)
   [ "$DISABLE_MIC" = 1 ] && [ -n "$card" ] && pactl set-card-profile "$card" output:iec958-stereo 2>/dev/null
   if [ -n "$n" ]; then amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null; amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null; fi
   [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
-  if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then
-    runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxwell-surround.XXXXXX") || return   # PipeWire needs the .conf suffix
-    hrtf_path="${XDG_DATA_HOME:-$HOME/.local/share}/tuxwell/hrtf/$HRTF"
-    [ -f "$hrtf_path" ] || hrtf_path="${XDG_DATA_HOME:-$HOME/.local/share}/tuxwell/hrtf/D1_48K_24bit_256tap_FIR_SOFA.sofa"
-    awk -v g="$SURROUND_GAIN" -v db="$CENTER_DB" -v hf="$hrtf_path" '
-      /name = spFC/ { fc = 1 }
-      /gain = [0-9.]+/ { v = g; if (fc) { v = g * 10 ^ (db / 20); fc = 0 }; sub(/gain = [0-9.]+/, sprintf("gain = %.4f", v)); sub(/filename = "[^"]*"/, "filename = \"" hf "\"") }
-      { print }' "$SURROUND" > "$runconf"
-    pipewire -c "$runconf" & surround_pid=$!
+  if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$TEMPLATE" ]; then
+    local hrtf_path eqfile target render args
+    runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxwell-surround.XXXXXX") || return
+    hrtf_path="$DATA_ROOT/hrtf/$HRTF"
+    [ -f "$hrtf_path" ] || hrtf_path="$DATA_ROOT/hrtf/D1_48K_24bit_256tap_FIR_SOFA.sofa"
+    eqfile=""; [ "$EQ" != off ] && [ -f "$DATA_ROOT/eq/$EQ.txt" ] && eqfile="$DATA_ROOT/eq/$EQ.txt"
+    target=$(pactl list short sinks | awk '/Audeze/ {print $2; exit}')
+    render=$(command -v tuxwell-render-surround || echo "$HOME/.local/bin/tuxwell-render-surround")
+    args=(--template "$TEMPLATE" --hrtf "$hrtf_path" --gain "$SURROUND_GAIN" --center-db "$CENTER_DB" --target "$target")
+    [ -n "$eqfile" ] && args+=(--eq "$eqfile")
+    if "$render" "${args[@]}" > "$runconf"; then
+      pipewire -c "$runconf" & surround_pid=$!
+    else
+      echo "tuxwell: could not build the surround config"; rm -f "$runconf"; runconf=""
+    fi
   fi
   echo "tuxwell: applied"
 }

@@ -1,6 +1,6 @@
 # Maxwell surround: 7.1 -> binaural virtual sink (SADIE II D1 HRTF via PipeWire's `sofa` plugin).
 # Run as its own client:  pipewire -c <this file>   (tuxwell does this only while the headset is connected)
-# Template: install.sh fills in @HRTF@, @GAIN@ and @TARGET@.
+# Template rendered by tuxwell-render-surround: head-response file, per-speaker gain, output target and an optional headphone correction stage.
 # Angles: SOFA convention, 0 = front, counter-clockwise (90 = left).
 
 context.properties = {
@@ -32,7 +32,7 @@ context.modules = [
                       config = { filename = "@HRTF@" gain = @GAIN@ }
                       control = { "Azimuth" = 330.0 "Elevation" = 0.0 "Radius" = 2.0 } }
                     { type = sofa label = spatializer name = spFC
-                      config = { filename = "@HRTF@" gain = @GAIN@ }
+                      config = { filename = "@HRTF@" gain = @GAIN_FC@ }
                       control = { "Azimuth" = 0.0 "Elevation" = 0.0 "Radius" = 2.0 } }
                     { type = sofa label = spatializer name = spSL
                       config = { filename = "@HRTF@" gain = @GAIN@ }
@@ -49,6 +49,7 @@ context.modules = [
                     { type = builtin label = copy  name = inLFE }
                     { type = builtin label = mixer name = mixL }
                     { type = builtin label = mixer name = mixR }
+@EQ_NODES@
                 ]
                 links = [
                     { output = "spFL:Out L" input = "mixL:In 1" }
@@ -67,9 +68,10 @@ context.modules = [
                     { output = "spRR:Out R" input = "mixR:In 7" }
                     { output = "inLFE:Out" input = "mixL:In 8" }
                     { output = "inLFE:Out" input = "mixR:In 8" }
+@EQ_LINKS@
                 ]
                 inputs  = [ "spFL:In" "spFR:In" "spFC:In" "inLFE:In" "spSL:In" "spSR:In" "spRL:In" "spRR:In" ]
-                outputs = [ "mixL:Out" "mixR:Out" ]
+                outputs = [ "@OUT_L@" "@OUT_R@" ]
             }
             capture.props = {
                 node.name      = "tuxwell_surround"

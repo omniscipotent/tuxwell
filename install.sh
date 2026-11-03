@@ -9,7 +9,7 @@ HRTF_SHA256=9af7cb19531e52fb7ae8ec92621e6ab62b1d5fe584b3742be36699a0ddb0ccd4
 URL='https://zenodo.org/records/12092466/files/D1_HRIR_SOFA.zip?download=1'
 if [ "${1:-}" = "--uninstall" ]; then
   systemctl --user disable --now tuxwell.service 2>/dev/null || true
-  rm -f ~/.local/bin/tuxwell ~/.local/bin/tuxwell-report ~/.local/bin/tuxwell-hrtf ~/.local/bin/tuxwell-test-sound ~/.local/bin/tuxwell-gui ~/.local/share/applications/io.github.omniscipotent.Tuxwell.desktop ~/.config/systemd/user/tuxwell.service "$CFG/surround.conf"
+  rm -f ~/.local/bin/tuxwell ~/.local/bin/tuxwell-report ~/.local/bin/tuxwell-hrtf ~/.local/bin/tuxwell-render-surround ~/.local/bin/tuxwell-test-sound ~/.local/bin/tuxwell-gui ~/.local/share/applications/io.github.omniscipotent.Tuxwell.desktop ~/.config/systemd/user/tuxwell.service
   systemctl --user daemon-reload
   echo "Removed. HRTF and $CFG/tuxwell.conf kept. udev rule: sudo rm /etc/udev/rules.d/70-audeze-maxwell.rules"; exit 0
 fi
@@ -55,9 +55,10 @@ if [ ! -f "$DATA/$HRTF" ]; then
   echo "$HRTF_SHA256  $tmp/$HRTF" | sha256sum -c - >/dev/null || { echo "HRTF checksum mismatch, refusing to install it"; exit 1; }
   install -m644 "$tmp/$HRTF" "$DATA/$HRTF"
 fi
-sink=$(pactl list short sinks | awk '/Audeze/ {print $2; exit}')
-sink=${sink:-alsa_output.usb-Audeze_LLC_Audeze_Maxwell_XBOX_Dongle_0000000000000000-00.iec958-stereo}
-sed -e "s|@HRTF@|$DATA/$HRTF|g" -e "s|@GAIN@|0.125|g" -e "s|@TARGET@|$sink|g" pipewire/tuxwell-surround.conf.in > "$CFG/surround.conf"
+ROOT="$(dirname "$DATA")"
+install -Dm644 pipewire/tuxwell-surround.conf.in "$ROOT/surround.conf.in"
+install -d "$ROOT/eq"; install -m644 data/eq/*.txt data/eq/catalog.tsv "$ROOT/eq/"
+rm -f "$CFG/surround.conf"        # older installs baked this at install time; it is rendered at each start now
 [ -f "$CFG/tuxwell.conf" ] || cat > "$CFG/tuxwell.conf" <<'C'
 HW_VOLUME=86
 DISABLE_MIC=1
@@ -67,6 +68,7 @@ C
 install -m755 bin/tuxwell ~/.local/bin/tuxwell
 install -m755 bin/tuxwell-report ~/.local/bin/tuxwell-report
 install -m755 bin/tuxwell-hrtf ~/.local/bin/tuxwell-hrtf
+install -m755 bin/tuxwell-render-surround ~/.local/bin/tuxwell-render-surround
 install -m755 bin/tuxwell-test-sound ~/.local/bin/tuxwell-test-sound
 install -Dm644 data/hrtf-catalog.tsv "$(dirname "$DATA")/hrtf-catalog.tsv"
 install -m644 systemd/tuxwell.service ~/.config/systemd/user/tuxwell.service

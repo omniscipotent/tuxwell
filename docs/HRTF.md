@@ -14,6 +14,8 @@ are checked against a pinned SHA-256.
 3. Try a handful (start with D1, D2 and three or four people). Keep the one where front and back are easiest to tell apart and the sound stays out of your head.
 4. Confirm with something you know well (a film scene with rain or crowds, or a game with footsteps), then leave it for a few days.
 
+5. Then try **Headphone correction** (step 3 in the app). With the Maxwell 2 data, *Neutral* is the one to start with; flip it on and off while something plays and keep it only if it sounds better to you. The change is gentle by design.
+
 Command line: `tuxwell-hrtf list`, `tuxwell-hrtf use H5`, `tuxwell-test-sound`.
 
 ## Notes

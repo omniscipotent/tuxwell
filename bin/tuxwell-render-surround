@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Render Tuxwell's surround filter-chain config from the template.
+
+Fills in the head-response file, the per-speaker gain (with the centre boost), the output target and, optionally,
+a headphone correction (an AutoEq-style parametric EQ) applied after the mix. The correction is loudness-matched:
+its overall level is offset so pink noise is equally loud with and without it, and capped so its peaks stay safe.
+Only the Python standard library is used. Usage:
+  tuxwell-render-surround --template T --hrtf FILE --gain G --center-db D --target SINK [--eq PROFILE.txt] > out.conf
+"""
+import argparse, math, re, sys
+
+FS = 48000.0
+LINE = re.compile(r"^Filter\s+\d+:\s+ON\s+(PK|LSC|HSC|LS|HS)\s+Fc\s+([\d.]+)\s*Hz\s+Gain\s+(-?[\d.]+)\s*dB\s+Q\s+([\d.]+)", re.I)
+LABEL = {"PK": "bq_peaking", "LSC": "bq_lowshelf", "LS": "bq_lowshelf", "HSC": "bq_highshelf", "HS": "bq_highshelf"}
+
+
+def parse_profile(path):
+    filters = []
+    for line in open(path):
+        m = LINE.match(line.strip())
+        if m:
+            kind = m.group(1).upper()
+            filters.append((LABEL[kind], float(m.group(2)), float(m.group(3)), float(m.group(4))))
+    return filters
+
+
+def coefs(label, fc, gain, q):
+    """RBJ cookbook biquad, normalised: (b0, b1, b2, a1, a2)."""
+    A = 10 ** (gain / 40); w0 = 2 * math.pi * fc / FS; c, s = math.cos(w0), math.sin(w0); al = s / (2 * q)
+    if label == "bq_peaking":
+        b = [1 + al * A, -2 * c, 1 - al * A]; a = [1 + al / A, -2 * c, 1 - al / A]
+    else:
+        sq = 2 * math.sqrt(A) * al
+        if label == "bq_lowshelf":
+            b = [A * ((A + 1) - (A - 1) * c + sq), 2 * A * ((A - 1) - (A + 1) * c), A * ((A + 1) - (A - 1) * c - sq)]
+            a = [(A + 1) + (A - 1) * c + sq, -2 * ((A - 1) + (A + 1) * c), (A + 1) + (A - 1) * c - sq]
+        else:
+            b = [A * ((A + 1) + (A - 1) * c + sq), -2 * A * ((A - 1) + (A + 1) * c), A * ((A + 1) + (A - 1) * c - sq)]
+            a = [(A + 1) - (A - 1) * c + sq, 2 * ((A - 1) - (A + 1) * c), (A + 1) - (A - 1) * c - sq]
+    return b[0] / a[0], b[1] / a[0], b[2] / a[0], a[1] / a[0], a[2] / a[0]
+
+
+def mag2(cf, f):
+    b0, b1, b2, a1, a2 = cf
+    w = 2 * math.pi * f / FS
+    z1 = complex(math.cos(w), -math.sin(w)); z2 = z1 * z1
+    h = (b0 + b1 * z1 + b2 * z2) / (1 + a1 * z1 + a2 * z2)
+    return abs(h) ** 2
+
+
+K1 = (1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585)   # BS.1770 stage 1
+K2 = (1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621)                                          # BS.1770 stage 2
+
+
+def makeup_db(filters):
+    """(offset in dB so pink noise keeps its loudness, peak boost in dB). Pink noise = equal power per octave."""
+    grid = [20 * (1000 ** (i / 399)) for i in range(400)]          # 20 Hz .. 20 kHz, log spaced
+    cfs = [coefs(*f) for f in filters]
+    num = den = 0.0; peak = -99.0
+    for f in grid:
+        k = mag2(K1, f) * mag2(K2, f)
+        h2 = 1.0
+        for cf in cfs:
+            h2 *= mag2(cf, f)
+        num += h2 * k; den += k; peak = max(peak, 10 * math.log10(h2))
+    return -10 * math.log10(num / den), peak
+
+
+def fmt(x):
+    return f"{x:.4f}".rstrip("0").rstrip(".") if "." in f"{x:.4f}" else f"{x:.4f}"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--template", required=True); ap.add_argument("--hrtf", required=True)
+    ap.add_argument("--gain", type=float, required=True); ap.add_argument("--center-db", type=float, default=0.0)
+    ap.add_argument("--target", required=True); ap.add_argument("--eq")
+    a = ap.parse_args()
+    s = open(a.template).read()
+    s = s.replace("@HRTF@", a.hrtf).replace("@TARGET@", a.target)
+    s = s.replace("@GAIN_FC@", fmt(a.gain * 10 ** (a.center_db / 20))).replace("@GAIN@", fmt(a.gain))
+    nodes, links, out_l, out_r = [], [], "mixL:Out", "mixR:Out"
+    filters = parse_profile(a.eq) if a.eq else []
+    if filters:
+        mk, peak = makeup_db(filters)
+        mk = min(mk, 3.0 - peak)                                    # keep the peaks within +3 dB of the unfiltered level
+        mult = fmt(10 ** (mk / 20))
+        print(f"tuxwell-render-surround: correction with {len(filters)} filters, level offset {mk:+.1f} dB (peak boost {peak:+.1f} dB)", file=sys.stderr)
+        for side, prev in (("L", "mixL"), ("R", "mixR")):
+            nodes.append(f'                    {{ type = builtin label = linear name = eqLvl{side} control = {{ "Mult" = {mult} "Add" = 0.0 }} }}')
+            links.append(f'                    {{ output = "{prev}:Out" input = "eqLvl{side}:In" }}')
+            prev = f"eqLvl{side}"
+            for i, (label, fc, gain, q) in enumerate(filters, 1):
+                name = f"eq{side}{i}"
+                nodes.append(f'                    {{ type = builtin label = {label} name = {name} control = {{ "Freq" = {fc} "Q" = {q} "Gain" = {gain} }} }}')
+                links.append(f'                    {{ output = "{prev}:Out" input = "{name}:In" }}')
+                prev = name
+            if side == "L": out_l = f"{prev}:Out"
+            else: out_r = f"{prev}:Out"
+    s = s.replace("@EQ_NODES@", "\n".join(nodes)).replace("@EQ_LINKS@", "\n".join(links))
+    s = s.replace("@OUT_L@:Out", out_l).replace("@OUT_R@:Out", out_r)
+    s = s.replace('"@OUT_L@"', f'"{out_l}"').replace('"@OUT_R@"', f'"{out_r}"')
+    left = re.findall(r"@[A-Z_]+@", s)
+    if left:
+        sys.exit(f"unfilled placeholders: {sorted(set(left))}")
+    sys.stdout.write(s)
+
+
+if __name__ == "__main__":
+    main()

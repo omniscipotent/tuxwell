@@ -1,0 +1,15 @@
+# Audeze Maxwell 2 headphone correction (generated, not hand-tuned)
+# Data:   SoundGuys' published B&K 5128 frequency-response measurement of the Maxwell 2 (ANC off), https://www.soundguys.com/product/audeze-maxwell-2/
+# Target: AutoEq 'Harman over-ear 2018' (MIT), method: AutoEq smoothing + parametric fit (tools/fit-eq.py)
+# Scope:  trusted 100 Hz-14 kHz only (fully 300 Hz-9 kHz). Bass and the extreme top end are left alone.
+# Assumes the headset is on its default 'Audeze' sound preset. One unit, one measurement: trust your ears.
+Preamp: -2.7 dB
+Filter 1: ON HS Fc 10000 Hz Gain -0.0 dB Q 0.70
+Filter 2: ON PK Fc 8948 Hz Gain -5.3 dB Q 1.78
+Filter 3: ON PK Fc 297 Hz Gain 1.2 dB Q 0.91
+Filter 4: ON PK Fc 4007 Hz Gain 3.1 dB Q 3.39
+Filter 5: ON PK Fc 2780 Hz Gain -3.1 dB Q 4.83
+Filter 6: ON PK Fc 1743 Hz Gain 1.5 dB Q 2.63
+Filter 7: ON PK Fc 6976 Hz Gain -2.4 dB Q 4.66
+Filter 8: ON PK Fc 767 Hz Gain -0.3 dB Q 2.84
+Filter 9: ON PK Fc 3383 Hz Gain 0.8 dB Q 5.42
