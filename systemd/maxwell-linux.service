@@ -1,0 +1,17 @@
+[Unit]
+Description=Audeze Maxwell settings (only while connected)
+After=pipewire.service wireplumber.service
+
+[Service]
+ExecStart=%h/.local/bin/maxwell-linux
+Restart=always
+KillMode=control-group
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+ProtectKernelModules=yes
+RestrictRealtime=no
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

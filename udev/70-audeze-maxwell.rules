@@ -1,0 +1,3 @@
+# Let the logged-in desktop user open the Audeze Maxwell HID interfaces (no root needed).
+# Maxwell 1: 4b18 4b19 4b1a 4b1e   Maxwell 2: 4b28 4b29 4b2a
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b18|4b19|4b1a|4b1e|4b28|4b29|4b2a", TAG+="uaccess"

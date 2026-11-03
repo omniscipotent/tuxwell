@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# maxwell-linux: applies Audeze Maxwell settings only while the dongle/headset is connected,
+# and undoes them when it is unplugged. Runs as a systemd user service.
+set -u
+umask 077
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/maxwell-linux/maxwell.conf"
+SURROUND="${XDG_CONFIG_HOME:-$HOME/.config}/maxwell-linux/surround.conf"
+# defaults (override in maxwell.conf)
+HW_VOLUME=86                    # dongle hardware PCM, 0-96 (1 step = 1 dB, 96 = 0 dB)
+RATES="48000 96000"
+DISABLE_MIC=1                   # 1 = playback-only card profile (headset mic hidden)
+SURROUND_ENABLED=1
+HIRES=1
+SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
+# Read the config as data, never as code: only known keys, only plain values.
+if [ -f "$CONF" ]; then
+  while IFS='=' read -r key val; do
+    val=${val%\'}; val=${val#\'}; val=${val%\"}; val=${val#\"}
+    case "$key" in
+      HW_VOLUME)        [[ $val =~ ^[0-9]+$ ]] && [ "$val" -le 96 ] && HW_VOLUME=$val ;;
+      DISABLE_MIC)      [[ $val =~ ^[01]$ ]] && DISABLE_MIC=$val ;;
+      SURROUND_ENABLED) [[ $val =~ ^[01]$ ]] && SURROUND_ENABLED=$val ;;
+      HIRES)            [[ $val =~ ^[01]$ ]] && HIRES=$val ;;
+      SURROUND_APPS)    [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && SURROUND_APPS=$val ;;
+    esac
+  done < "$CONF"
+fi
+
+present=0; surround_pid=""
+# The dongle stays on the USB bus when the headset powers off, but its audio sink disappears.
+connected() { pactl list short sinks 2>/dev/null | grep -q "Audeze"; }
+card_name() { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
+alsa_card() { awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null; }
+
+apply() {
+  local card n; card=$(card_name); n=$(alsa_card)
+  [ "$DISABLE_MIC" = 1 ] && [ -n "$card" ] && pactl set-card-profile "$card" output:iec958-stereo 2>/dev/null
+  if [ -n "$n" ]; then amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null; amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null; fi
+  [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
+  if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then pipewire -c "$SURROUND" & surround_pid=$!; fi
+  echo "maxwell-linux: applied"
+}
+revert() {
+  [ -n "$surround_pid" ] && kill "$surround_pid" 2>/dev/null; surround_pid=""
+  pw-metadata -n settings 0 clock.allowed-rates "[ 48000 ]" >/dev/null
+  echo "maxwell-linux: reverted"
+}
+
+# Send streams from chosen apps (SURROUND_APPS, a regex matched against each stream's properties)
+# to the surround sink. Everything else stays on the default output (stereo).
+route_apps() {
+  [ -n "$SURROUND_APPS" ] || return 0
+  local sid idx cur
+  sid=$(pactl list short sinks | awk '$2=="maxwell_surround" {print $1}')
+  [ -n "$sid" ] || return 0
+  pactl list sink-inputs | awk -v re="$SURROUND_APPS" '
+    /^Sink Input #/ { if (idx != "" && hit) print idx; idx=substr($3,2); hit=0 }
+    $0 ~ re { hit=1 }
+    END { if (idx != "" && hit) print idx }' | while read -r idx; do
+      cur=$(pactl list short sink-inputs | awk -v i="$idx" '$1==i {print $2}')
+      [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" maxwell_surround 2>/dev/null
+    done
+}
+check() {
+  if connected; then [ $present = 0 ] && { sleep 2; apply; present=1; sleep 2; }
+    route_apps
+  else [ $present = 1 ] && { revert; present=0; }; fi
+}
+trap 'revert; exit 0' TERM INT
+check
+pactl subscribe | grep --line-buffered -E "'(new|remove)' on (sink|card|sink-input) " | while read -r _; do check; done

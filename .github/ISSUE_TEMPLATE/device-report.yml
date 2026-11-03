@@ -1,0 +1,25 @@
+name: Device / distro report
+description: Tell us how it works (or doesn't) on your distro or Audeze model
+labels: ["new device", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: "Run `maxwell-linux-report` and paste the output below. Read it first; it contains no usernames or hostnames, but check anyway."
+  - type: input
+    id: device
+    attributes:
+      label: Headset and dongle
+      placeholder: "Maxwell 2, PlayStation dongle"
+    validations: {required: true}
+  - type: textarea
+    id: report
+    attributes:
+      label: Output of `maxwell-linux-report`
+      render: text
+    validations: {required: true}
+  - type: textarea
+    id: works
+    attributes:
+      label: What works, what doesn't
+      description: Volume, 96 kHz, surround, presets, sidetone, tray, install steps (and any package names you had to use)
+    validations: {required: true}

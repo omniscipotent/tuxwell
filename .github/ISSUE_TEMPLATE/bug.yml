@@ -1,0 +1,21 @@
+name: Bug report
+description: Something broke
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations: {required: true}
+  - type: textarea
+    id: report
+    attributes:
+      label: Output of `maxwell-linux-report`
+      render: text
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: "`journalctl --user -u maxwell-linux -b --no-pager | tail -50`"
+      render: text

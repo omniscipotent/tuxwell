@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Prints non-personal diagnostics for bug reports and new-device / new-distro requests.
+# Read it before pasting it anywhere. It contains no usernames, hostnames or file paths.
+echo "## System"
+. /etc/os-release 2>/dev/null && echo "distro: ${PRETTY_NAME:-unknown}"
+echo "kernel: $(uname -r)"
+echo "pipewire: $(pipewire --version 2>/dev/null | tail -1)"
+echo "desktop: ${XDG_CURRENT_DESKTOP:-unknown} (${XDG_SESSION_TYPE:-unknown})"
+echo
+echo "## Audeze USB devices (vendor 3329)"
+lsusb -d 3329: 2>/dev/null || echo "none"
+echo
+echo "## HID nodes"
+for u in /sys/class/hidraw/hidraw*/device/uevent; do
+  grep -q -i ":00003329:" "$u" 2>/dev/null && echo "$(basename "$(dirname "$(dirname "$u")")") $(grep -E '^(HID_ID|HID_NAME)=' "$u" | tr '\n' ' ')"
+done
+echo
+echo "## ALSA cards"
+grep -i -A1 "audeze" /proc/asound/cards 2>/dev/null || echo "none"
+echo
+echo "## Sinks"
+pactl list short sinks 2>/dev/null | awk '{print $2, $NF}' | grep -i -E "audeze|maxwell" || echo "none"
+echo
+echo "## Service"
+systemctl --user is-active maxwell-linux 2>&1
+systemctl --user is-enabled maxwell-linux 2>&1
+echo "sofa plugin: $(ls /usr/lib*/spa-0.2/filter-graph/*sofa* 2>/dev/null | head -1 | sed 's#.*/##' || true)"
+echo
+echo "## Dongle volume / rates"
+n=$(awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null)
+[ -n "$n" ] && { amixer -c "$n" sget 'PCM',0 2>/dev/null | grep -m1 "Front Left:"; grep -E "Rates:" /proc/asound/card"$n"/stream0 2>/dev/null | sort -u; }
+pw-metadata -n settings 2>/dev/null | grep -E "clock.(rate|allowed-rates)"

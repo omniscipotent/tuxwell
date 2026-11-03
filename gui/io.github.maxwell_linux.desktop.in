@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Tuxwell
+GenericName=Headset control panel
+Comment=Control panel for Audeze Maxwell headsets (Tuxwell)
+Exec=@BIN@/maxwell-linux-gui
+Icon=io.github.maxwell_linux
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=Tuxwell;Audeze;Maxwell;headset;surround;EQ;
+StartupNotify=true
+StartupWMClass=io.github.maxwell_linux

@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""maxwell-linux-gui: control panel for Audeze Maxwell headsets on Linux (GTK4 + libadwaita)."""
+import fcntl, glob, os, re, shlex, shutil, subprocess, threading, time
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk
+
+CFG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "maxwell-linux")
+CFG = os.path.join(CFG_DIR, "maxwell.conf")
+RATES_ON = "48000 96000"
+PRESETS = ["Audeze", "Treble Boost", "Bass Boost", "Immersive", "Competition", "Footsteps",
+           "EQ 1 (custom)", "EQ 2 (custom)", "EQ 3 (custom)", "EQ 4 (custom)"]  # value sent = position + 1
+DONGLE_HID = "3329:00004B28"  # Maxwell 2 Xbox dongle: the only model tested. See docs/DEVICES.md to add others
+DEFAULT_CTL = os.path.expanduser("~/.local/share/maxwell-linux/audezeforlinux/maxwell_ctl.py")
+
+
+def dongle_hidraw():
+    for u in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
+        try:
+            if DONGLE_HID in open(u).read().upper():
+                return "/dev/" + u.split("/")[4]
+        except OSError:
+            pass
+    return None
+
+
+def select_preset(value):
+    """Select preset 1..10 with a 62-byte report sent as a control SET_REPORT
+    (HIDIOCSOUTPUT). The headset ignores built-in presets when this is sent as a plain hidraw write."""
+    path = dongle_hidraw()
+    if not path or not 1 <= value <= 10:
+        return False
+    report = bytes([0x06, 0x09, 0x80, 0x05, 0x5A, 0x05, 0x00, 0x00, 0x09, 0x00, 0x00, value]).ljust(62, b"\x00")
+    req = (3 << 30) | (len(report) << 16) | (ord("H") << 8) | 0x0B  # HIDIOCSOUTPUT
+    try:
+        fd = os.open(path, os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, req, bytearray(report))
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+def tilde(path):
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
+
+
+def run(*args, timeout=15):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout + r.stderr
+    except Exception as e:  # missing binary, timeout
+        return 1, str(e)
+
+
+def read_conf():
+    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "CTL_PATH": ""}
+    try:
+        for line in open(CFG):
+            m = re.match(r'\s*([A-Z_]+)=(.*)', line)
+            if m:
+                c[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return c
+
+
+def write_conf(c):
+    os.makedirs(CFG_DIR, exist_ok=True)
+    with open(CFG, "w") as f:
+        for k, v in c.items():
+            f.write(f'{k}={shlex.quote(str(v))}\n')
+
+
+def audeze_card():
+    """ALSA card number of the Audeze dongle (the card id is just 'Dongle', so match the long name)."""
+    try:
+        for m in re.finditer(r"^\s*(\d+) \[[^\]]*\]:\s*(.*)$", open("/proc/asound/cards").read(), re.M):
+            if "Audeze" in m.group(2):
+                return int(m.group(1))
+    except OSError:
+        pass
+    return None
+
+
+def sinks():
+    return run("pactl", "list", "short", "sinks")[1]
+
+
+def sink_name(match):
+    for line in sinks().splitlines():
+        p = line.split("\t")
+        if len(p) > 1 and match in p[1]:
+            return p[1]
+    return None
+
+
+def card_profile_name():
+    for line in run("pactl", "list", "short", "cards")[1].splitlines():
+        p = line.split("\t")
+        if len(p) > 1 and "Audeze" in p[1]:
+            return p[1]
+    return None
+
+
+class Win(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Tuxwell", default_width=560, default_height=int(os.environ.get("MAXWELL_HEIGHT", "780")))
+        self.conf = read_conf()
+        self.busy = False
+        self.timer = None
+        view = Adw.ToolbarView()
+        view.add_top_bar(Adw.HeaderBar())
+        self.toast = Adw.ToastOverlay()
+        self.toast.set_child(view)
+        self.set_content(self.toast)
+        page = Adw.PreferencesPage()
+        view.set_content(page)
+
+        # --- Status
+        g = Adw.PreferencesGroup(title="Headset")
+        page.add(g)
+        self.r_conn = Adw.ActionRow(title="Connection")
+        self.r_rate = Adw.ActionRow(title="Sample rate")
+        self.r_surr = Adw.ActionRow(title="Surround sink")
+        for r in (self.r_conn, self.r_rate, self.r_surr):
+            r.add_css_class("property")
+            g.add(r)
+
+        # --- Output
+        g = Adw.PreferencesGroup(title="Output", description="Where apps play by default")
+        page.add(g)
+        self.r_out = Adw.ComboRow(title="Default output", subtitle="Use surround for movies and games",
+                                  model=Gtk.StringList.new(["Stereo", "Surround 7.1 (virtual)"]))
+        self.out_id = self.r_out.connect("notify::selected", self.on_output)
+        g.add(self.r_out)
+
+        # --- Audio
+        g = Adw.PreferencesGroup(title="Audio", description="Applied whenever the headset powers on")
+        page.add(g)
+        self.r_vol = Adw.ActionRow(title="Hardware volume", subtitle="The dongle's own gain. 100% is loudest.")
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 96, 1)
+        self.scale.set_value(int(self.conf["HW_VOLUME"]))
+        self.scale.set_size_request(200, -1)
+        self.scale.set_valign(Gtk.Align.CENTER)
+        self.scale.set_draw_value(True)
+        self.scale.set_format_value_func(lambda s, v: f"{round(v / 96 * 100)}%")
+        self.vol_id = self.scale.connect("value-changed", self.on_volume)
+        self.r_vol.add_suffix(self.scale)
+        g.add(self.r_vol)
+        self.s_hires = self.switch_row("Hi-res audio", "Switch between 48 and 96 kHz to match what is playing", self.conf["HIRES"] == "1", self.on_hires)
+        self.s_mic = self.switch_row("Hide headset mic", "Playback-only profile, the mic never shows up as an input", self.conf["DISABLE_MIC"] == "1", self.on_mic)
+        self.s_surr = self.switch_row("Virtual surround", "Creates the Maxwell Surround (7.1) output", self.conf["SURROUND_ENABLED"] == "1", self.on_surround)
+        for r in (self.s_hires, self.s_mic, self.s_surr):
+            g.add(r)
+
+        # --- Headset settings (audezeforlinux)
+        self.g_hs = Adw.PreferencesGroup(title="Headset settings",
+                                         description="Stored in the headset. Uses audezeforlinux (maxwell_ctl.py).")
+        page.add(self.g_hs)
+        self.r_path = Adw.EntryRow(title="Path to maxwell_ctl.py")
+        self.r_path.set_text(tilde(self.conf["CTL_PATH"] or (DEFAULT_CTL if os.path.exists(DEFAULT_CTL) else "")))
+        self.r_path.connect("apply", self.on_path)
+        self.r_path.set_show_apply_button(True)
+        self.g_hs.add(self.r_path)
+        self.r_preset = Adw.ComboRow(title="Sound preset", subtitle="Built-in presets and your four EQ slots",
+                                     model=Gtk.StringList.new(PRESETS))
+        self.preset_id = self.r_preset.connect("notify::selected", self.on_preset)
+        self.r_side = Adw.ActionRow(title="Sidetone", subtitle="Hear your own mic. 0 is off, up to 31.")
+        self.side = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 31, 1)
+        self.side.set_size_request(200, -1)
+        self.side.set_valign(Gtk.Align.CENTER)
+        self.side.set_draw_value(True)
+        self.side_id = self.side.connect("value-changed", self.on_side)
+        self.r_side.add_suffix(self.side)
+        self.r_chat = Adw.ActionRow(title="Game / chat mix", subtitle="Left is all game, right is all chat")
+        self.chat = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.chat.set_size_request(200, -1)
+        self.chat.set_valign(Gtk.Align.CENTER)
+        self.chat.set_draw_value(True)
+        self.chat_id = self.chat.connect("value-changed", self.on_chat)
+        self.r_chat.add_suffix(self.chat)
+        self.r_info = Adw.ActionRow(title="Battery and firmware")
+        self.r_info.add_css_class("property")
+        for r in (self.r_preset, self.r_side, self.r_chat, self.r_info):
+            self.g_hs.add(r)
+        btn = Gtk.Button(label="Refresh", valign=Gtk.Align.CENTER)
+        btn.connect("clicked", lambda *_: self.read_headset())
+        self.r_info.add_suffix(btn)
+
+        shot = os.environ.get("MAXWELL_SCREENSHOT")
+        if shot:
+            self.unmaximize()
+            self.set_default_size(560, int(os.environ.get("MAXWELL_HEIGHT", "780")))
+            self.set_size_request(560, int(os.environ.get("MAXWELL_HEIGHT", "780")))
+            GLib.timeout_add(2500, self.screenshot, shot)
+        self.pending = {}
+        self.refresh()
+        GLib.timeout_add_seconds(2, self.refresh)
+        self.read_headset()
+
+    def screenshot(self, path):
+        self.set_focus(None)
+        paintable = Gtk.WidgetPaintable.new(self)
+        w, h = self.get_width(), self.get_height()
+        snap = Gtk.Snapshot()
+        paintable.snapshot(snap, w, h)
+        node = snap.to_node()
+        tex = self.get_native().get_renderer().render_texture(node, None)
+        tex.save_to_png(path)
+        self.get_application().quit()
+        return False
+
+    # helpers
+    def switch_row(self, title, sub, active, cb):
+        r = Adw.SwitchRow(title=title, subtitle=sub)
+        r.set_active(active)
+        r.connect("notify::active", cb)
+        return r
+
+    def say(self, msg):
+        self.toast.add_toast(Adw.Toast(title=msg, timeout=3))
+
+    def save(self, **kw):
+        self.conf.update({k: str(v) for k, v in kw.items()})
+        write_conf(self.conf)
+
+    def debounce(self, key, fn, ms=350):
+        if key in self.pending:
+            GLib.source_remove(self.pending[key])
+        def go():
+            self.pending.pop(key, None)
+            fn()
+            return False
+        self.pending[key] = GLib.timeout_add(ms, go)
+
+    # status
+    def refresh(self):
+        dev = sink_name("Audeze") is not None
+        self.r_conn.set_subtitle("Connected" if dev else "Headset is off or not connected")
+        rate = "-"
+        n = audeze_card()
+        if dev and n is not None:
+            try:
+                m = re.search(r"Momentary freq = (\d+) Hz", open(f"/proc/asound/card{n}/stream0").read())
+                rate = f"{int(m.group(1))/1000:g} kHz" if m else "idle"
+            except OSError:
+                pass
+        self.r_rate.set_subtitle(rate)
+        surr = sink_name("maxwell_surround") is not None
+        self.r_surr.set_subtitle("Active" if surr else "Not running")
+        self.r_out.set_sensitive(dev)
+        if dev:
+            d = run("pactl", "get-default-sink")[1].strip()
+            want = 1 if "maxwell_surround" in d else 0
+            if self.r_out.get_selected() != want and d:
+                self.r_out.handler_block(self.out_id)
+                self.r_out.set_selected(want)
+                self.r_out.handler_unblock(self.out_id)
+        return True
+
+    # audio actions
+    def on_output(self, row, _):
+        target = sink_name("maxwell_surround") if row.get_selected() == 1 else sink_name("Audeze")
+        if not target:
+            self.say("That output isn't available right now")
+            return
+        run("pactl", "set-default-sink", target)
+        for line in run("pactl", "list", "short", "sink-inputs")[1].splitlines():
+            run("pactl", "move-sink-input", line.split("\t")[0], target)
+
+    def on_volume(self, scale):
+        v = int(scale.get_value())
+        def apply():
+            n = audeze_card()
+            if n is None:
+                self.say("Headset not connected, saved for next time")
+            else:
+                for i in (0, 1):
+                    run("amixer", "-c", str(n), "sset", f"PCM,{i}", str(v))
+            self.save(HW_VOLUME=v)
+        self.debounce("vol", apply)
+
+    def on_hires(self, row, _):
+        on = row.get_active()
+        run("pw-metadata", "-n", "settings", "0", "clock.allowed-rates", f"[ {RATES_ON if on else '48000'} ]")
+        self.save(HIRES=int(on))
+
+    def on_mic(self, row, _):
+        on = row.get_active()
+        card = card_profile_name()
+        if card:
+            run("pactl", "set-card-profile", card,
+                "output:iec958-stereo" if on else "output:iec958-stereo+input:mono-fallback")
+        self.save(DISABLE_MIC=int(on))
+
+    def on_surround(self, row, _):
+        self.save(SURROUND_ENABLED=int(row.get_active()))
+        run("systemctl", "--user", "restart", "maxwell-linux.service")
+        self.say("Surround " + ("on" if row.get_active() else "off"))
+
+    # headset (maxwell_ctl)
+    def ctl(self):
+        p = os.path.expanduser(self.r_path.get_text().strip())
+        return p if p and os.path.isfile(p) else None
+
+    def on_path(self, row):
+        self.save(CTL_PATH=row.get_text().strip())
+        self.read_headset()
+
+    def ctl_run(self, *args, then=None):
+        p = self.ctl()
+        if not p:
+            self.say("Set the path to maxwell_ctl.py first")
+            return
+        def work():
+            rc, out = self._run_in_dir(p, *args)
+            if then:
+                GLib.idle_add(then, rc, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _run_in_dir(self, p, *args):
+        try:
+            r = subprocess.run(["python3", p, "--plain", *args], capture_output=True, text=True,
+                               timeout=30, cwd=os.path.dirname(p))
+            return r.returncode, r.stdout + r.stderr
+        except Exception as e:
+            return 1, str(e)
+
+    def read_headset(self):
+        has = self.ctl() is not None
+        for r in (self.r_preset, self.r_side, self.r_chat):
+            r.set_sensitive(has)
+        if not has:
+            self.r_info.set_subtitle("Clone audezeforlinux and set the path above")
+            return
+        def done(rc, out):
+            if rc != 0 or "Battery" not in out:
+                self.r_info.set_subtitle("No answer from the headset (is it on?)")
+                return
+            def f(label):
+                m = re.search(label + r"\s*:\s*(.+)", out)
+                return m.group(1).strip() if m else ""
+            self.r_info.set_subtitle(f"Battery {f('Battery Level')}   Firmware {f('Firmware Version')}")
+            pr = f("Active Preset")
+            m = re.search(r"\[(\d+)\]", pr)
+            idx = int(m.group(1)) if m else None
+            st = re.search(r"Level (\d+)/31", f("Sidetone"))
+            ch = re.search(r"Chat (\d+)%", f("Game / Chat Mix"))
+            self.r_preset.handler_block(self.preset_id)
+            if idx is not None and 1 <= idx <= 10:
+                self.r_preset.set_selected(idx - 1)
+            self.r_preset.handler_unblock(self.preset_id)
+            if st:
+                on = f("Sidetone").startswith("ON")
+                self.side.handler_block(self.side_id); self.side.set_value(int(st.group(1)) if on else 0)
+                self.side.handler_unblock(self.side_id)
+            if ch:
+                self.chat.handler_block(self.chat_id); self.chat.set_value(int(ch.group(1)))
+                self.chat.handler_unblock(self.chat_id)
+        self.ctl_run("status", then=done)
+
+    def on_preset(self, row, _):
+        n = row.get_selected()
+        if n == Gtk.INVALID_LIST_POSITION:
+            return
+        if not select_preset(n + 1):
+            self.say("Couldn't reach the headset (is it on, and is the udev rule installed?)")
+            return
+        self.say(PRESETS[n])
+        GLib.timeout_add_seconds(2, lambda: (self.read_headset(), False)[1])
+
+    def on_side(self, s):
+        v = int(s.get_value())
+        self.debounce("side", lambda: self.ctl_run("sidetone", "off" if v == 0 else str(v)))
+
+    def on_chat(self, s):
+        v = int(s.get_value())
+        self.debounce("chat", lambda: self.ctl_run("chatmix", str(v)))
+
+
+
+SNI_XML = """<node>
+ <interface name="org.kde.StatusNotifierItem">
+  <property name="Category" type="s" access="read"/>
+  <property name="Id" type="s" access="read"/>
+  <property name="Title" type="s" access="read"/>
+  <property name="Status" type="s" access="read"/>
+  <property name="WindowId" type="i" access="read"/>
+  <property name="IconName" type="s" access="read"/>
+  <property name="IconThemePath" type="s" access="read"/>
+  <property name="OverlayIconName" type="s" access="read"/>
+  <property name="AttentionIconName" type="s" access="read"/>
+  <property name="ItemIsMenu" type="b" access="read"/>
+  <property name="Menu" type="o" access="read"/>
+  <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="SecondaryActivate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="ContextMenu"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="Scroll"><arg type="i" direction="in"/><arg type="s" direction="in"/></method>
+  <signal name="NewIcon"/><signal name="NewStatus"><arg type="s"/></signal>
+ </interface></node>"""
+
+MENU_XML = """<node>
+ <interface name="com.canonical.dbusmenu">
+  <property name="Version" type="u" access="read"/>
+  <property name="TextDirection" type="s" access="read"/>
+  <property name="Status" type="s" access="read"/>
+  <property name="IconThemePath" type="as" access="read"/>
+  <method name="GetLayout"><arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="as" direction="in"/>
+   <arg type="u" direction="out"/><arg type="(ia{sv}av)" direction="out"/></method>
+  <method name="GetGroupProperties"><arg type="ai" direction="in"/><arg type="as" direction="in"/>
+   <arg type="a(ia{sv})" direction="out"/></method>
+  <method name="GetProperty"><arg type="i" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="out"/></method>
+  <method name="Event"><arg type="i" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="in"/><arg type="u" direction="in"/></method>
+  <method name="EventGroup"><arg type="a(isvu)" direction="in"/><arg type="ai" direction="out"/></method>
+  <method name="AboutToShow"><arg type="i" direction="in"/><arg type="b" direction="out"/></method>
+  <method name="AboutToShowGroup"><arg type="ai" direction="in"/><arg type="ai" direction="out"/><arg type="ai" direction="out"/></method>
+  <signal name="LayoutUpdated"><arg type="u"/><arg type="i"/></signal>
+ </interface></node>"""
+
+ICON_NAME = "io.github.maxwell_linux"
+
+
+class Tray:
+    """Minimal StatusNotifierItem (the tray protocol used by Discord, qBittorrent, Proton...)."""
+
+    def __init__(self, on_toggle, on_quit):
+        self.on_toggle, self.on_quit = on_toggle, on_quit
+        self.items = [(1, "Show / hide Tuxwell"), (2, "Quit")]
+        self.ok = False
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+            Gio.bus_own_name_on_connection(self.bus, self.name, Gio.BusNameOwnerFlags.NONE, None, None)
+            self.bus.register_object("/StatusNotifierItem", Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0],
+                                     self.sni_call, self.sni_get, None)
+            self.bus.register_object("/MenuBar", Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0],
+                                     self.menu_call, self.menu_get, None)
+            self.bus.call("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher",
+                          "RegisterStatusNotifierItem", GLib.Variant("(s)", (self.name,)), None,
+                          Gio.DBusCallFlags.NONE, 2000, None, self._registered)
+        except Exception as e:  # no tray available: the app still works without it
+            print("tray unavailable:", e)
+
+    def _registered(self, bus, res):
+        try:
+            bus.call_finish(res)
+            self.ok = True
+        except Exception as e:
+            print("tray not registered (is a tray extension enabled?):", e)
+
+    # StatusNotifierItem
+    def sni_get(self, conn, sender, path, iface, prop):
+        v = {"Category": ("s", "Hardware"), "Id": ("s", "maxwell-linux"), "Title": ("s", "Tuxwell"),
+             "Status": ("s", "Active"), "WindowId": ("i", 0), "IconName": ("s", ICON_NAME),
+             "IconThemePath": ("s", ""), "OverlayIconName": ("s", ""), "AttentionIconName": ("s", ""),
+             "ItemIsMenu": ("b", False), "Menu": ("o", "/MenuBar")}.get(prop)
+        return GLib.Variant(*v) if v else None
+
+    def sni_call(self, conn, sender, path, iface, method, params, inv):
+        if method in ("Activate", "SecondaryActivate"):
+            GLib.idle_add(self.on_toggle)
+        inv.return_value(None)
+
+    # dbusmenu
+    def _item(self, i, label):
+        return GLib.Variant("(ia{sv}av)", (i, {"label": GLib.Variant("s", label), "enabled": GLib.Variant("b", True),
+                                              "visible": GLib.Variant("b", True)}, []))
+
+    def menu_get(self, conn, sender, path, iface, prop):
+        return {"Version": GLib.Variant("u", 3), "TextDirection": GLib.Variant("s", "ltr"),
+                "Status": GLib.Variant("s", "normal"), "IconThemePath": GLib.Variant("as", [])}.get(prop)
+
+    def menu_call(self, conn, sender, path, iface, method, params, inv):
+        if method == "GetLayout":
+            kids = [self._item(i, l) for i, l in self.items]
+            root = (0, {"children-display": GLib.Variant("s", "submenu")}, kids)
+            inv.return_value(GLib.Variant("(u(ia{sv}av))", (1, root)))
+        elif method == "GetGroupProperties":
+            inv.return_value(GLib.Variant("(a(ia{sv}))", ([(i, {"label": GLib.Variant("s", l)}) for i, l in self.items],)))
+        elif method == "GetProperty":
+            inv.return_value(GLib.Variant("(v)", (GLib.Variant("s", ""),)))
+        elif method == "Event":
+            i, event = params.unpack()[0], params.unpack()[1]
+            if event == "clicked":
+                GLib.idle_add(self.on_toggle if i == 1 else self.on_quit)
+            inv.return_value(None)
+        elif method == "AboutToShow":
+            inv.return_value(GLib.Variant("(b)", (False,)))
+        elif method == "AboutToShowGroup":
+            inv.return_value(GLib.Variant("(aiai)", ([], [])))
+        elif method == "EventGroup":
+            for i, event, _, _ in params.unpack()[0]:
+                if event == "clicked":
+                    GLib.idle_add(self.on_toggle if i == 1 else self.on_quit)
+            inv.return_value(GLib.Variant("(ai)", ([],)))
+        else:
+            inv.return_value(None)
+
+
+class App(Adw.Application):
+    def __init__(self):
+        flags = Gio.ApplicationFlags.NON_UNIQUE if os.environ.get("MAXWELL_SCREENSHOT") else Gio.ApplicationFlags.DEFAULT_FLAGS
+        super().__init__(application_id="io.github.maxwell_linux", flags=flags)
+        self.tray = None
+        self.win = None
+
+    def do_activate(self):
+        win = self.win
+        if win is None:
+            win = self.win = Win(self)
+            if not os.environ.get("MAXWELL_SCREENSHOT"):
+                win.connect("close-request", self.on_close)   # closing hides to the tray
+                self.hold()
+                self.tray = Tray(self.toggle, self.quit)
+        win.present()
+
+    def on_close(self, win):
+        if self.tray and self.tray.ok:
+            win.set_visible(False)
+            return True
+        return False
+
+    def toggle(self):
+        win = self.win
+        if win:
+            win.set_visible(False) if win.get_visible() and win.is_active() else win.present()
+        return False
+
+
+if __name__ == "__main__":
+    App().run()
