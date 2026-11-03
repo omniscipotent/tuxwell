@@ -4,7 +4,7 @@ labels: ["new device", "help wanted"]
 body:
   - type: markdown
     attributes:
-      value: "Run `maxwell-linux-report` and paste the output below. Read it first; it contains no usernames or hostnames, but check anyway."
+      value: "Run `tuxwell-report` and paste the output below. Read it first; it contains no usernames or hostnames, but check anyway."
   - type: input
     id: device
     attributes:
@@ -14,7 +14,7 @@ body:
   - type: textarea
     id: report
     attributes:
-      label: Output of `maxwell-linux-report`
+      label: Output of `tuxwell-report`
       render: text
     validations: {required: true}
   - type: textarea

@@ -22,8 +22,8 @@ echo "## Sinks"
 pactl list short sinks 2>/dev/null | awk '{print $2, $NF}' | grep -i -E "audeze|maxwell" || echo "none"
 echo
 echo "## Service"
-systemctl --user is-active maxwell-linux 2>&1
-systemctl --user is-enabled maxwell-linux 2>&1
+systemctl --user is-active tuxwell 2>&1
+systemctl --user is-enabled tuxwell 2>&1
 echo "sofa plugin: $(ls /usr/lib*/spa-0.2/filter-graph/*sofa* 2>/dev/null | head -1 | sed 's#.*/##' || true)"
 echo
 echo "## Dongle volume / rates"

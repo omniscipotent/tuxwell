@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# maxwell-linux: applies Audeze Maxwell settings only while the dongle/headset is connected,
+# tuxwell: applies Audeze Maxwell settings only while the dongle/headset is connected,
 # and undoes them when it is unplugged. Runs as a systemd user service.
 set -u
 umask 077
-CONF="${XDG_CONFIG_HOME:-$HOME/.config}/maxwell-linux/maxwell.conf"
-SURROUND="${XDG_CONFIG_HOME:-$HOME/.config}/maxwell-linux/surround.conf"
-# defaults (override in maxwell.conf)
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/tuxwell.conf"
+SURROUND="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/surround.conf"
+# defaults (override in tuxwell.conf)
 HW_VOLUME=86                    # dongle hardware PCM, 0-96 (1 step = 1 dB, 96 = 0 dB)
 RATES="48000 96000"
 DISABLE_MIC=1                   # 1 = playback-only card profile (headset mic hidden)
@@ -42,20 +42,20 @@ apply() {
   if [ -n "$n" ]; then amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null; amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null; fi
   [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
   if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then
-    runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/maxwell-linux-surround.XXXXXX") || return   # PipeWire needs the .conf suffix
+    runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxwell-surround.XXXXXX") || return   # PipeWire needs the .conf suffix
     awk -v g="$SURROUND_GAIN" -v db="$CENTER_DB" '
       /name = spFC/ { fc = 1 }
       /gain = [0-9.]+/ { v = g; if (fc) { v = g * 10 ^ (db / 20); fc = 0 }; sub(/gain = [0-9.]+/, sprintf("gain = %.4f", v)) }
       { print }' "$SURROUND" > "$runconf"
     pipewire -c "$runconf" & surround_pid=$!
   fi
-  echo "maxwell-linux: applied"
+  echo "tuxwell: applied"
 }
 revert() {
   [ -n "$surround_pid" ] && kill "$surround_pid" 2>/dev/null; surround_pid=""
   [ -n "$runconf" ] && rm -f "$runconf"; runconf=""
   pw-metadata -n settings 0 clock.allowed-rates "[ 48000 ]" >/dev/null
-  echo "maxwell-linux: reverted"
+  echo "tuxwell: reverted"
 }
 
 # Send streams from chosen apps (SURROUND_APPS, a regex matched against each stream's properties)
@@ -63,14 +63,14 @@ revert() {
 route_apps() {
   [ -n "$SURROUND_APPS" ] || return 0
   local sid idx cur
-  sid=$(pactl list short sinks | awk '$2=="maxwell_surround" {print $1}')
+  sid=$(pactl list short sinks | awk '$2=="tuxwell_surround" {print $1}')
   [ -n "$sid" ] || return 0
   pactl list sink-inputs | awk -v re="$SURROUND_APPS" '
     /^Sink Input #/ { if (idx != "" && hit) print idx; idx=substr($3,2); hit=0 }
     $0 ~ re { hit=1 }
     END { if (idx != "" && hit) print idx }' | while read -r idx; do
       cur=$(pactl list short sink-inputs | awk -v i="$idx" '$1==i {print $2}')
-      [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" maxwell_surround 2>/dev/null
+      [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" tuxwell_surround 2>/dev/null
     done
 }
 check() {

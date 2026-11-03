@@ -1,5 +1,5 @@
 # Maxwell surround: 7.1 -> binaural virtual sink (SADIE II D1 HRTF via PipeWire's `sofa` plugin).
-# Run as its own client:  pipewire -c <this file>   (maxwell-linux does this only while the headset is connected)
+# Run as its own client:  pipewire -c <this file>   (tuxwell does this only while the headset is connected)
 # Template: install.sh fills in @HRTF@, @GAIN@ and @TARGET@.
 # Angles: SOFA convention, 0 = front, counter-clockwise (90 = left).
 
@@ -21,8 +21,8 @@ context.modules = [
     { name = libpipewire-module-filter-chain
         flags = [ nofail ]
         args = {
-            node.description = "Maxwell Surround (7.1)"
-            media.name       = "Maxwell Surround (7.1)"
+            node.description = "Tuxwell Surround (7.1)"
+            media.name       = "Tuxwell Surround (7.1)"
             filter.graph = {
                 nodes = [
                     { type = sofa label = spatializer name = spFL
@@ -72,13 +72,13 @@ context.modules = [
                 outputs = [ "mixL:Out" "mixR:Out" ]
             }
             capture.props = {
-                node.name      = "maxwell_surround"
+                node.name      = "tuxwell_surround"
                 media.class    = Audio/Sink
                 audio.channels = 8
                 audio.position = [ FL FR FC LFE SL SR RL RR ]
             }
             playback.props = {
-                node.name         = "maxwell_surround.output"
+                node.name         = "tuxwell_surround.output"
                 node.passive      = true
                 node.dont-fallback = true
                 target.object     = "@TARGET@"

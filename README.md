@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/io.github.maxwell_linux.png" width="140" alt="Tuxwell">
+<img src="assets/io.github.omniscipotent.Tuxwell.png" width="140" alt="Tuxwell">
 
 # Tuxwell
 
@@ -24,7 +24,7 @@ and does it only while the headset is powered on. Turn the headphones off and ev
 |---|---|
 | **Proper volume** | Sets the dongle's own hardware gain. It idles around -20 dB, which is why the headset feels quiet. |
 | **Hi-res audio** | Lets PipeWire switch the dongle between 48 and 96 kHz, 24-bit, to match what plays (the dongle has no 44.1 kHz mode, so 44.1 material is converted to 48). It only switches when nothing else is playing at the old rate. |
-| **Virtual 7.1 surround** | A *Maxwell Surround (7.1)* output that renders 5.1/7.1 to your headphones using the SADIE II HRTF. |
+| **Virtual 7.1 surround** | A *Tuxwell Surround (7.1)* output that renders 5.1/7.1 to your headphones using the SADIE II HRTF. |
 | **Per-app surround** | Chosen apps (Plex HTPC by default) go to surround automatically. Everything else stays stereo, so pausing a movie to do something else just works. |
 | **Mic out of the way** | Optional playback-only profile, so the headset mic never gets picked as an input by mistake. |
 | **Follows the headset** | Detects the headset powering on and off, even with the dongle always plugged in. |
@@ -56,13 +56,13 @@ These live inside the headset and need two things:
    then switch the headset off and on once.
 2. [audezeforlinux](https://github.com/scotthowson/audezeforlinux), a separate project that speaks the headset's protocol:
    ```bash
-   git clone --depth 1 https://github.com/scotthowson/audezeforlinux ~/.local/share/maxwell-linux/audezeforlinux
+   git clone --depth 1 https://github.com/scotthowson/audezeforlinux ~/.local/share/tuxwell/audezeforlinux
    ```
    The panel finds it there. Read its code first; it is not part of this project, and its firmware tool can write to your hardware.
 
 ## Configure
 
-`~/.config/maxwell-linux/maxwell.conf`
+`~/.config/tuxwell/tuxwell.conf`
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -79,7 +79,7 @@ Find another app's identifiers with `pactl list sink-inputs` while it plays.
 
 ## How it works
 
-A user systemd service (`maxwell-linux.service`) watches PipeWire for the Audeze sink. The dongle stays on the USB bus when the
+A user systemd service (`tuxwell.service`) watches PipeWire for the Audeze sink. The dongle stays on the USB bus when the
 headset powers off, but its audio sink disappears, so that is the signal. When it appears the service sets the hardware volume,
 allows the extra sample rates, switches the card profile and starts the surround sink as a separate PipeWire client
 (without restarting PipeWire). When it disappears everything is undone.
@@ -103,7 +103,7 @@ sudo rm -f /etc/udev/rules.d/70-audeze-maxwell.rules   # if you installed it
 | Other distros and desktops | Untested, help wanted |
 
 This started as one person's setup and is meant to grow. See [docs/DEVICES.md](docs/DEVICES.md) for what is device- and distro-specific,
-and [CONTRIBUTING.md](CONTRIBUTING.md) to help. If you try it, please run `maxwell-linux-report` and open a *Device / distro report* issue.
+and [CONTRIBUTING.md](CONTRIBUTING.md) to help. If you try it, please run `tuxwell-report` and open a *Device / distro report* issue.
 
 ## Notes and limits
 
@@ -119,7 +119,7 @@ and [CONTRIBUTING.md](CONTRIBUTING.md) to help. If you try it, please run `maxwe
 
 ## Credits
 
-- Logo: based on Tux, the Linux mascot created by Larry Ewing using The GIMP. The artwork was generated with ChatGPT.
+- Logo: based on Tux, the Linux mascot created by Larry Ewing using The GIMP. The artwork was generated with ChatGPT. See [assets/README.md](assets/README.md) for the terms.
 - HRTF: SADIE II, University of York.
 
 ## License

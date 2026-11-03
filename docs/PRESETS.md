@@ -21,7 +21,7 @@ firmware v1.0.5.7):
   Built-in presets cannot be reached.
 - **Control `SET_REPORT` (`HIDIOCSOUTPUT`)**: N = 1..10 selects the preset named above.
 
-maxwell-linux uses the second method.
+Tuxwell uses the second method.
 Reading the active preset (`05 5A 04 00 01 09 00 00`) returns the same 1..10 numbering.
 
 Note: do not experiment with other values for this setting. Out-of-range values can power the headset off.

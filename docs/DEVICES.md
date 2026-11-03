@@ -16,11 +16,11 @@ IDs other than `4b28` come from other community projects and the udev rule, not 
 
 ### What is device specific
 - **Audio side** (hardware volume, 48/96 kHz, mic profile, surround): the service finds the dongle by name (`Audeze` in the ALSA card / sink name), so it may already work on other Audeze USB devices.
-- **Headset side** (presets, sidetone, chat mix): the control panel talks to the HID interface with the Xbox dongle's ID `3329:00004B28` (`DONGLE_HID` at the top of `gui/maxwell-linux-gui`).
+- **Headset side** (presets, sidetone, chat mix): the control panel talks to the HID interface with the Xbox dongle's ID `3329:00004B28` (`DONGLE_HID` at the top of `gui/tuxwell-gui`).
   Other models need their packets confirmed first. See [PRESETS.md](PRESETS.md) for the preset values and the gotcha about control `SET_REPORT`.
 
 ### Adding a device
-1. Run `maxwell-linux-report` and open a **Device report** issue with the output.
+1. Run `tuxwell-report` and open a **Device report** issue with the output.
 2. Talk it through in the issue before sending anything new to the headset. Compare with the table in [PRESETS.md](PRESETS.md). Don't guess values on real hardware: out-of-range preset values powered a headset off during testing.
 
 ## Distros

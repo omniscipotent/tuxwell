@@ -10,12 +10,12 @@ body:
   - type: textarea
     id: report
     attributes:
-      label: Output of `maxwell-linux-report`
+      label: Output of `tuxwell-report`
       render: text
     validations: {required: true}
   - type: textarea
     id: logs
     attributes:
       label: Logs (optional)
-      description: "`journalctl --user -u maxwell-linux -b --no-pager | tail -50`"
+      description: "`journalctl --user -u tuxwell -b --no-pager | tail -50`"
       render: text

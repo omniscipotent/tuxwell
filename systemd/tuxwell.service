@@ -3,7 +3,7 @@ Description=Audeze Maxwell settings (only while connected)
 After=pipewire.service wireplumber.service
 
 [Service]
-ExecStart=%h/.local/bin/maxwell-linux
+ExecStart=%h/.local/bin/tuxwell
 Restart=always
 KillMode=control-group
 NoNewPrivileges=yes
