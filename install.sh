@@ -9,7 +9,7 @@ HRTF_SHA256=9af7cb19531e52fb7ae8ec92621e6ab62b1d5fe584b3742be36699a0ddb0ccd4
 URL='https://zenodo.org/records/12092466/files/D1_HRIR_SOFA.zip?download=1'
 if [ "${1:-}" = "--uninstall" ]; then
   systemctl --user disable --now tuxwell.service 2>/dev/null || true
-  rm -f ~/.local/bin/tuxwell ~/.local/bin/tuxwell-report ~/.local/bin/tuxwell-gui ~/.local/share/applications/io.github.omniscipotent.Tuxwell.desktop ~/.config/systemd/user/tuxwell.service "$CFG/surround.conf"
+  rm -f ~/.local/bin/tuxwell ~/.local/bin/tuxwell-report ~/.local/bin/tuxwell-hrtf ~/.local/bin/tuxwell-test-sound ~/.local/bin/tuxwell-gui ~/.local/share/applications/io.github.omniscipotent.Tuxwell.desktop ~/.config/systemd/user/tuxwell.service "$CFG/surround.conf"
   systemctl --user daemon-reload
   echo "Removed. HRTF and $CFG/tuxwell.conf kept. udev rule: sudo rm /etc/udev/rules.d/70-audeze-maxwell.rules"; exit 0
 fi
@@ -66,6 +66,9 @@ HIRES=1
 C
 install -m755 bin/tuxwell ~/.local/bin/tuxwell
 install -m755 bin/tuxwell-report ~/.local/bin/tuxwell-report
+install -m755 bin/tuxwell-hrtf ~/.local/bin/tuxwell-hrtf
+install -m755 bin/tuxwell-test-sound ~/.local/bin/tuxwell-test-sound
+install -Dm644 data/hrtf-catalog.tsv "$(dirname "$DATA")/hrtf-catalog.tsv"
 install -m644 systemd/tuxwell.service ~/.config/systemd/user/tuxwell.service
 install -m755 gui/tuxwell-gui ~/.local/bin/tuxwell-gui
 install -d ~/.local/share/applications

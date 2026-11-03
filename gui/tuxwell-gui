@@ -44,6 +44,17 @@ def select_preset(value):
         return False
 
 
+CATALOG = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "tuxwell", "hrtf-catalog.tsv")
+
+
+def read_catalog():
+    """[(id, label, zip, inner, sha256)] of the available head-response sets."""
+    try:
+        return [l.rstrip("\n").split("\t") for l in open(CATALOG) if l.strip()]
+    except OSError:
+        return []
+
+
 def tilde(path):
     home = os.path.expanduser("~")
     return "~" + path[len(home):] if path.startswith(home + os.sep) else path
@@ -170,6 +181,22 @@ class Win(Adw.ApplicationWindow):
         self.gain.connect("value-changed", self.on_gain)
         self.r_gain.add_suffix(self.gain)
         g.add(self.r_gain)
+        self.catalog = read_catalog()
+        if self.catalog:
+            self.r_hrtf = Adw.ComboRow(title="Head response",
+                                       subtitle="Everyone's ears differ. Try a few with the test sound.",
+                                       model=Gtk.StringList.new([c[1] for c in self.catalog]))
+            cur = (self.conf.get("HRTF") or "D1_48K_24bit_256tap_FIR_SOFA.sofa")
+            for i, c in enumerate(self.catalog):
+                if c[3].endswith("/" + cur):
+                    self.r_hrtf.set_selected(i)
+            self.hrtf_id = self.r_hrtf.connect("notify::selected", self.on_hrtf)
+            g.add(self.r_hrtf)
+            self.r_test = Adw.ActionRow(title="Test sound", subtitle="Noise bursts circle around you, then alternate front and back")
+            tb = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
+            tb.connect("clicked", self.on_test)
+            self.r_test.add_suffix(tb)
+            g.add(self.r_test)
 
         # --- Headset settings (audezeforlinux)
         self.g_hs = Adw.PreferencesGroup(title="Headset settings",
@@ -239,8 +266,10 @@ class Win(Adw.ApplicationWindow):
         self.toast.add_toast(Adw.Toast(title=msg, timeout=3))
 
     def save(self, **kw):
-        self.conf.update({k: str(v) for k, v in kw.items()})
-        write_conf(self.conf)
+        c = read_conf()                      # re-read: other tools (tuxwell-hrtf) also write this file
+        c.update({k: str(v) for k, v in kw.items()})
+        self.conf = c
+        write_conf(c)
 
     def debounce(self, key, fn, ms=350):
         if key in self.pending:
@@ -336,6 +365,21 @@ class Win(Adw.ApplicationWindow):
             run("pactl", "set-card-profile", card,
                 "output:iec958-stereo" if on else "output:iec958-stereo+input:mono-fallback")
         self.save(DISABLE_MIC=int(on))
+
+    def on_hrtf(self, row, _):
+        n = row.get_selected()
+        if n == Gtk.INVALID_LIST_POSITION or n >= len(self.catalog):
+            return
+        sid, label = self.catalog[n][0], self.catalog[n][1]
+        self.say(f"Switching to {label} (downloads if needed)...")
+        def work():
+            rc, out = run("tuxwell-hrtf", "use", sid, timeout=600)
+            GLib.idle_add(self.say, f"Now using {label}" if rc == 0 else f"Couldn't switch: {out.strip()[-80:]}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_test(self, _btn):
+        self.say("Playing the test sound")
+        threading.Thread(target=run, args=("tuxwell-test-sound",), kwargs={"timeout": 60}, daemon=True).start()
 
     def on_gain(self, scale):
         v = round(scale.get_value(), 2)

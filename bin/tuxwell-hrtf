@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# tuxwell-hrtf: list, fetch and switch the head-response (HRTF) set used by the surround output.
+#   tuxwell-hrtf list            show the available sets (* = in use, + = downloaded)
+#   tuxwell-hrtf use <id>        download if needed, switch to it and restart the surround (e.g. H5)
+#   tuxwell-hrtf current         print the id in use
+# Sets are the SADIE II database (University of York, Apache-2.0), each checked against a pinned SHA-256.
+set -eu
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/tuxwell"
+CAT="$DATA/hrtf-catalog.tsv"
+DIR="$DATA/hrtf"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/tuxwell.conf"
+BASE='https://zenodo.org/records/12092466/files'
+DEFAULT_FILE=D1_48K_24bit_256tap_FIR_SOFA.sofa
+
+[ -f "$CAT" ] || { echo "catalog not found: $CAT (run ./install.sh)" >&2; exit 1; }
+field() { awk -F'\t' -v id="$1" -v n="$2" '$1==id {print $n}' "$CAT"; }      # id, label, zip, inner, sha256
+file_of() { basename "$(field "$1" 4)"; }
+current_file() { v=$(grep -s '^HRTF=' "$CONF" | tail -1 | cut -d= -f2- | tr -d "'\""); echo "${v:-$DEFAULT_FILE}"; }
+current_id() { f=$(current_file); awk -F'\t' -v f="$f" '{n=split($4,a,"/"); if (a[n]==f) {print $1; exit}}' "$CAT"; }
+
+fetch() {
+  local id=$1 zip inner sha dest tmp
+  [ -n "$(field "$id" 1)" ] || { echo "unknown set: $id" >&2; return 1; }
+  zip=$(field "$id" 3); inner=$(field "$id" 4); sha=$(field "$id" 5); dest="$DIR/$(file_of "$id")"
+  if [ -f "$dest" ] && echo "$sha  $dest" | sha256sum -c - >/dev/null 2>&1; then return 0; fi
+  mkdir -p "$DIR"; tmp=$(mktemp -d)
+  echo "Downloading $id ($zip)..." >&2
+  curl --proto '=https' --tlsv1.2 -fL -s -o "$tmp/z.zip" "$BASE/$zip?download=1"
+  unzip -j -q -o "$tmp/z.zip" "$inner" -d "$tmp"
+  if ! echo "$sha  $tmp/$(basename "$inner")" | sha256sum -c - >/dev/null 2>&1; then
+    rm -rf "$tmp"; echo "checksum mismatch for $id, refusing to install it" >&2; return 1
+  fi
+  install -m644 "$tmp/$(basename "$inner")" "$dest"; rm -rf "$tmp"
+}
+
+case "${1:-list}" in
+  list)
+    cur=$(current_id)
+    while IFS=$'\t' read -r id label _ inner _; do
+      mark=" "; [ "$id" = "$cur" ] && mark="*"
+      have=" "; [ -f "$DIR/$(basename "$inner")" ] && have="+"
+      printf '%s%s %-4s %s\n' "$mark" "$have" "$id" "$label"
+    done < "$CAT" ;;
+  current) current_id ;;
+  use)
+    id=${2:?usage: tuxwell-hrtf use <id>}
+    fetch "$id"
+    mkdir -p "$(dirname "$CONF")"; touch "$CONF"
+    sed -i '/^HRTF=/d' "$CONF"; echo "HRTF=$(file_of "$id")" >> "$CONF"
+    systemctl --user restart tuxwell.service
+    echo "Now using $id: $(field "$id" 2)" ;;
+  fetch) fetch "${2:?usage: tuxwell-hrtf fetch <id>}" ;;
+  *) echo "usage: tuxwell-hrtf list | current | use <id> | fetch <id>" >&2; exit 2 ;;
+esac

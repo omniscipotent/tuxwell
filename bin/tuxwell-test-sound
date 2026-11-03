@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Plays short noise bursts around your head through the Tuxwell surround output, to compare head-response sets.
+
+Round 1 walks a circle: front, front-right, right, back-right, back-left, left, front-left.
+Round 2 alternates front and back on each side: that is where a poor match gives itself away
+(a sound that should be behind you appears in front, or the other way round).
+Keep the volume modest. Needs the surround output to be running (headset on).
+"""
+import array, os, random, subprocess, sys, tempfile, wave
+
+R = 48000
+CH = ["FL", "FR", "FC", "LFE", "SL", "SR", "RL", "RR"]   # the surround sink's channel order
+
+
+def pink(n, seed=7):
+    rnd = random.Random(seed)
+    b = [0.0] * 7
+    out = []
+    for _ in range(n):
+        w = rnd.uniform(-1, 1)
+        b[0] = 0.99886 * b[0] + w * 0.0555179; b[1] = 0.99332 * b[1] + w * 0.0750759
+        b[2] = 0.96900 * b[2] + w * 0.1538520; b[3] = 0.86650 * b[3] + w * 0.3104856
+        b[4] = 0.55000 * b[4] + w * 0.5329522; b[5] = -0.7616 * b[5] - w * 0.0168980
+        out.append((b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + w * 0.5362) * 0.11)
+        b[6] = w * 0.115926
+    return out
+
+
+def build(sequence, burst=0.55, gap=0.35, amp=0.10):
+    nb, ng = int(R * burst), int(R * gap)
+    noise = pink(nb)
+    pk = max(abs(v) for v in noise) or 1
+    a = array.array("h")
+    for name in sequence:
+        ch = CH.index(name)
+        for i, v in enumerate(noise):
+            env = min(1.0, i / 1500, (nb - i) / 1500)
+            s = int(32767 * amp * env * v / pk)
+            frame = [0] * 8
+            frame[ch] = s
+            a.extend(frame)
+        a.extend([0] * (8 * ng))
+    return a
+
+
+def main():
+    circle = ["FC", "FR", "SR", "RR", "RL", "SL", "FL"]
+    frontback = ["FL", "RL", "FR", "RR", "FL", "RL", "FR", "RR"]
+    data = build(circle)
+    data.extend([0] * (8 * R))           # a second of silence between the rounds
+    data.extend(build(frontback))
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "tuxwell-test.wav")
+        with wave.open(path, "wb") as w:
+            w.setnchannels(8); w.setsampwidth(2); w.setframerate(R)
+            w.writeframes(data.tobytes())
+        print("Round 1: a circle around you. Round 2: front/back pairs. Listen for sounds outside your head.", flush=True)
+        rc = subprocess.call(["pw-play", "--target", "tuxwell_surround", path])
+        if rc:
+            print("Could not play: is the headset on and the surround output running?", file=sys.stderr)
+        return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

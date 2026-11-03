@@ -25,6 +25,7 @@ and does it only while the headset is powered on. Turn the headphones off and ev
 | **Proper volume** | Sets the dongle's own hardware gain. It idles around -20 dB, which is why the headset feels quiet. |
 | **Hi-res audio** | Lets PipeWire switch the dongle between 48 and 96 kHz, 24-bit, to match what plays (the dongle has no 44.1 kHz mode, so 44.1 material is converted to 48). It only switches when nothing else is playing at the old rate. |
 | **Virtual 7.1 surround** | A *Tuxwell Surround (7.1)* output that renders 5.1/7.1 to your headphones using the SADIE II HRTF. |
+| **Your own head response** | 20 openly licensed measured heads (SADIE II) you can try from the app, with a test sound that circles around you. Everyone's ears differ, so the right one matters. See [docs/HRTF.md](docs/HRTF.md). |
 | **Per-app surround** | Chosen apps (Plex HTPC by default) go to surround automatically, and the default output follows playback: surround while Plex plays, stereo when you pause, with one volume across both. |
 | **Mic out of the way** | Optional playback-only profile, so the headset mic never gets picked as an input by mistake. |
 | **Follows the headset** | Detects the headset powering on and off, even with the dongle always plugged in. |
@@ -67,6 +68,7 @@ These live inside the headset and need two things:
 | Key | Default | Meaning |
 |---|---|---|
 | `HW_VOLUME` | `86` | Dongle gain, 0 to 96 (1 step = 1 dB, 96 = loudest) |
+| `HRTF` | `D1_48K_24bit_256tap_FIR_SOFA.sofa` | Head-response file in use. Change it with `tuxwell-hrtf use <id>` or in the app. |
 | `HIRES` | `1` | Allow 48 / 96 kHz switching |
 | `DISABLE_MIC` | `1` | Playback-only card profile |
 | `SURROUND_ENABLED` | `1` | Create the surround output |
