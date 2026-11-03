@@ -13,6 +13,8 @@ DISABLE_MIC=1                   # 1 = playback-only card profile (headset mic hi
 SURROUND_ENABLED=1
 HIRES=1
 SURROUND_GAIN=0.27               # per-speaker gain; 0.27 makes centred stereo as loud as the stereo output
+LFE_DB=10                        # lift the bass (LFE) channel of 5.1/7.1 content, dB. A cinema plays it ~10 dB hotter than the mains; 0 = leave it
+BASS_DB=0                        # extra bass on everything in the surround output (low shelf at 105 Hz), dB
 CENTER_DB=3                      # extra dB on the centre channel, so 5.1 dialogue matches a stereo downmix
 SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
 HRTF=D1_48K_24bit_256tap_FIR_SOFA.sofa   # head-response file in ~/.local/share/tuxwell/hrtf (see tuxwell-hrtf)
@@ -29,6 +31,8 @@ if [ -f "$CONF" ]; then
       SURROUND_ENABLED) [[ $val =~ ^[01]$ ]] && SURROUND_ENABLED=$val ;;
       HIRES)            [[ $val =~ ^[01]$ ]] && HIRES=$val ;;
       SURROUND_GAIN)    [[ $val =~ ^[0-9]*\.?[0-9]+$ ]] && awk "BEGIN{exit !($val > 0 && $val <= 1.5)}" && SURROUND_GAIN=$val ;;
+      LFE_DB)           [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 24)}" && LFE_DB=$val ;;
+      BASS_DB)          [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 12)}" && BASS_DB=$val ;;
       CENTER_DB)        [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 9)}" && CENTER_DB=$val ;;
       HRTF)             [[ $val =~ ^[A-Za-z0-9._-]+\.sofa$ ]] && HRTF=$val ;;
       EQ)               [[ $val =~ ^(off|[a-z0-9-]+)$ ]] && EQ=$val ;;
@@ -58,7 +62,7 @@ apply() {
     eqfile=""; [ "$EQ" != off ] && [ -f "$DATA_ROOT/eq/$EQ.txt" ] && eqfile="$DATA_ROOT/eq/$EQ.txt"
     target=$(pactl list short sinks | awk '/Audeze/ {print $2; exit}')
     render=$(command -v tuxwell-render-surround || echo "$HOME/.local/bin/tuxwell-render-surround")
-    args=(--template "$TEMPLATE" --hrtf "$hrtf_path" --gain "$SURROUND_GAIN" --center-db "$CENTER_DB" --target "$target")
+    args=(--template "$TEMPLATE" --hrtf "$hrtf_path" --gain "$SURROUND_GAIN" --center-db "$CENTER_DB" --lfe-db "$LFE_DB" --bass-db "$BASS_DB" --target "$target")
     [ -n "$eqfile" ] && args+=(--eq "$eqfile")
     if "$render" "${args[@]}" > "$runconf"; then
       pipewire -c "$runconf" & surround_pid=$!

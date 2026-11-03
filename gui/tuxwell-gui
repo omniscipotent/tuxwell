@@ -80,7 +80,7 @@ def run(*args, timeout=15):
 
 
 def read_conf():
-    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.27", "AUTO_DEFAULT": "1", "CTL_PATH": ""}
+    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.27", "LFE_DB": "10", "BASS_DB": "0", "AUTO_DEFAULT": "1", "CTL_PATH": ""}
     try:
         for line in open(CFG):
             m = re.match(r'\s*([A-Z_]+)=(.*)', line)
@@ -200,6 +200,15 @@ class Win(Adw.ApplicationWindow):
         self.gain, _ = slider(0.10, 0.60, 0.05, float(self.conf["SURROUND_GAIN"]), self.on_gain, digits=2)
         self.r_gain.add_suffix(self.gain)
         g.add(self.r_gain)
+        g = group(pg, "Bass", "Movies keep their rumble in a separate bass channel. These two controls add punch.")
+        self.r_lfe = Adw.ActionRow(title="Bass channel (5.1 / 7.1 movies)", subtitle="Explosions and rumble. A cinema plays this about 10 dB louder than the rest, so higher is truer to the mix.")
+        self.lfe, _ = slider(0, 20, 1, float(self.conf["LFE_DB"]), self.on_lfe, lambda s, v: f"+{int(v)} dB")
+        self.r_lfe.add_suffix(self.lfe)
+        g.add(self.r_lfe)
+        self.r_bass = Adw.ActionRow(title="Bass boost (everything)", subtitle="A gentle lift of the low end for music, games and shows. 0 leaves it as is.")
+        self.bass, _ = slider(0, 9, 1, float(self.conf["BASS_DB"]), self.on_bass, lambda s, v: f"+{int(v)} dB")
+        self.r_bass.add_suffix(self.bass)
+        g.add(self.r_bass)
         g = group(pg, "Find your sound", "Everyone's ears and headphones differ. Work down this list: pick a head response, press Play to hear it, then try the correction.")
         self.catalog = read_catalog()
         if self.catalog:
@@ -446,6 +455,20 @@ class Win(Adw.ApplicationWindow):
     def on_test(self, _btn):
         self.say("Playing the test sound")
         threading.Thread(target=run, args=("tuxwell-test-sound",), kwargs={"timeout": 60}, daemon=True).start()
+
+    def _tune(self, key, value, label):
+        def apply():
+            self.save(**{key: value})
+            if self.conf.get("SURROUND_ENABLED") == "1":
+                threading.Thread(target=run, args=("systemctl", "--user", "restart", "tuxwell.service"), daemon=True).start()
+                self.say(f"{label} +{value:g} dB")
+        self.debounce(key, apply, 1200)
+
+    def on_lfe(self, scale):
+        self._tune("LFE_DB", round(scale.get_value()), "Bass channel")
+
+    def on_bass(self, scale):
+        self._tune("BASS_DB", round(scale.get_value()), "Bass boost")
 
     def on_gain(self, scale):
         v = round(scale.get_value(), 2)

@@ -5,7 +5,10 @@ Fills in the head-response file, the per-speaker gain (with the centre boost), t
 a headphone correction (an AutoEq-style parametric EQ) applied after the mix. The correction is loudness-matched:
 its overall level is offset so pink noise is equally loud with and without it, and capped so its peaks stay safe.
 Only the Python standard library is used. Usage:
-  tuxwell-render-surround --template T --hrtf FILE --gain G --center-db D --target SINK [--eq PROFILE.txt] > out.conf
+  tuxwell-render-surround --template T --hrtf FILE --gain G --center-db D --target SINK [--lfe-db L] [--bass-db B] [--eq PROFILE.txt] > out.conf
+
+--lfe-db lifts the dedicated bass (LFE) channel of 5.1/7.1 content. A cinema plays that channel about 10 dB louder than the others;
+the virtual mix otherwise leaves it far too quiet. --bass-db adds a gentle low shelf (105 Hz) to everything in the surround output.
 """
 import argparse, math, re, sys
 
@@ -75,17 +78,23 @@ def main():
     ap.add_argument("--template", required=True); ap.add_argument("--hrtf", required=True)
     ap.add_argument("--gain", type=float, required=True); ap.add_argument("--center-db", type=float, default=0.0)
     ap.add_argument("--target", required=True); ap.add_argument("--eq")
+    ap.add_argument("--lfe-db", type=float, default=0.0); ap.add_argument("--bass-db", type=float, default=0.0)
     a = ap.parse_args()
     s = open(a.template).read()
     s = s.replace("@HRTF@", a.hrtf).replace("@TARGET@", a.target)
     s = s.replace("@GAIN_FC@", fmt(a.gain * 10 ** (a.center_db / 20))).replace("@GAIN@", fmt(a.gain))
     nodes, links, out_l, out_r = [], [], "mixL:Out", "mixR:Out"
+    if a.lfe_db:
+        s = s.replace("{ type = builtin label = copy  name = inLFE }",
+                      f'{{ type = builtin label = linear name = inLFE control = {{ "Mult" = {fmt(10 ** (a.lfe_db / 20))} "Add" = 0.0 }} }}')
     filters = parse_profile(a.eq) if a.eq else []
+    if a.bass_db:
+        filters = [("bq_lowshelf", 105.0, a.bass_db, 0.7)] + filters
     if filters:
         mk, peak = makeup_db(filters)
         mk = min(mk, 3.0 - peak)                                    # keep the peaks within +3 dB of the unfiltered level
         mult = fmt(10 ** (mk / 20))
-        print(f"tuxwell-render-surround: correction with {len(filters)} filters, level offset {mk:+.1f} dB (peak boost {peak:+.1f} dB)", file=sys.stderr)
+        print(f"tuxwell-render-surround: {len(filters)} filter(s), level offset {mk:+.1f} dB (peak boost {peak:+.1f} dB)", file=sys.stderr)
         for side, prev in (("L", "mixL"), ("R", "mixR")):
             nodes.append(f'                    {{ type = builtin label = linear name = eqLvl{side} control = {{ "Mult" = {mult} "Add" = 0.0 }} }}')
             links.append(f'                    {{ output = "{prev}:Out" input = "eqLvl{side}:In" }}')

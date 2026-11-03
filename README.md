@@ -74,6 +74,8 @@ These live inside the headset and need two things:
 | `HIRES` | `1` | Allow 48 / 96 kHz switching |
 | `DISABLE_MIC` | `1` | Playback-only card profile |
 | `SURROUND_ENABLED` | `1` | Create the surround output |
+| `LFE_DB` | `10` | Lift for the dedicated bass (LFE) channel of 5.1/7.1 content. Measured: left alone it reached the ears ~11 dB *below* a normal channel, while a cinema plays it ~10 dB *above*. Up to 24. |
+| `BASS_DB` | `0` | Extra bass on everything in the surround output (a low shelf at 105 Hz), up to 12 dB. |
 | `SURROUND_GAIN` | `0.27` | Level of the surround mix (also a slider in the app). 0.27 was measured to make centred stereo exactly as loud through surround as through the stereo output. |
 | `CENTER_DB` | `3` | Extra dB on the centre channel so 5.1 dialogue matches a stereo downmix. |
 | `AUTO_DEFAULT` | `1` | The default output follows playback: surround while `PLAYING_APPS` plays, stereo when it pauses. Your volume is carried across each switch. |
