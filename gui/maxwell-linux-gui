@@ -294,8 +294,14 @@ class Win(Adw.ApplicationWindow):
             run("pactl", "set-sink-volume", target, f"{level}%")
             run("pactl", "set-sink-volume", old, "100%")
         run("pactl", "set-default-sink", target)
-        for line in run("pactl", "list", "short", "sink-inputs")[1].splitlines():
-            run("pactl", "move-sink-input", line.split("\t")[0], target)
+        # Move only the streams that were on the output we are leaving, and never the surround filter's own stream.
+        left = next((l.split("\t")[0] for l in run("pactl", "list", "short", "sinks")[1].splitlines()
+                     if l.split("\t")[1:2] == [other]), None)
+        for blk in re.split(r"\n(?=Sink Input #)", run("pactl", "list", "sink-inputs")[1]):
+            m = re.match(r"\s*Sink Input #(\d+)", blk)
+            on = re.search(r"^\s*Sink: (\d+)", blk, re.M)
+            if m and on and on.group(1) == left and "maxwell_surround" not in blk:
+                run("pactl", "move-sink-input", m.group(1), target)
 
     def on_volume(self, scale):
         v = int(scale.get_value())

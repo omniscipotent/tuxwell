@@ -30,19 +30,19 @@ if [ -f "$CONF" ]; then
   done < "$CONF"
 fi
 
-present=0; surround_pid=""
+present=0; surround_pid=""; runconf=""
 # The dongle stays on the USB bus when the headset powers off, but its audio sink disappears.
 connected() { pactl list short sinks 2>/dev/null | grep -q "Audeze"; }
 card_name() { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
 alsa_card() { awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null; }
 
 apply() {
-  local card n runconf; card=$(card_name); n=$(alsa_card)
+  local card n; card=$(card_name); n=$(alsa_card)
   [ "$DISABLE_MIC" = 1 ] && [ -n "$card" ] && pactl set-card-profile "$card" output:iec958-stereo 2>/dev/null
   if [ -n "$n" ]; then amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null; amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null; fi
   [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
   if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then
-    runconf="${XDG_RUNTIME_DIR:-/tmp}/maxwell-linux-surround.conf"
+    runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/maxwell-linux-surround.XXXXXX") || return   # PipeWire needs the .conf suffix
     awk -v g="$SURROUND_GAIN" -v db="$CENTER_DB" '
       /name = spFC/ { fc = 1 }
       /gain = [0-9.]+/ { v = g; if (fc) { v = g * 10 ^ (db / 20); fc = 0 }; sub(/gain = [0-9.]+/, sprintf("gain = %.4f", v)) }
@@ -53,6 +53,7 @@ apply() {
 }
 revert() {
   [ -n "$surround_pid" ] && kill "$surround_pid" 2>/dev/null; surround_pid=""
+  [ -n "$runconf" ] && rm -f "$runconf"; runconf=""
   pw-metadata -n settings 0 clock.allowed-rates "[ 48000 ]" >/dev/null
   echo "maxwell-linux: reverted"
 }
