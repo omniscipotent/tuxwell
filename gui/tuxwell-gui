@@ -58,7 +58,7 @@ def run(*args, timeout=15):
 
 
 def read_conf():
-    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.27", "CTL_PATH": ""}
+    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.27", "AUTO_DEFAULT": "1", "CTL_PATH": ""}
     try:
         for line in open(CFG):
             m = re.match(r'\s*([A-Z_]+)=(.*)', line)
@@ -138,6 +138,9 @@ class Win(Adw.ApplicationWindow):
                                   model=Gtk.StringList.new(["Stereo", "Surround 7.1 (virtual)"]))
         self.out_id = self.r_out.connect("notify::selected", self.on_output)
         g.add(self.r_out)
+        self.s_auto = self.switch_row("Follow playback", "Surround becomes the default output while Plex HTPC plays, and stereo again when it pauses",
+                                      self.conf["AUTO_DEFAULT"] == "1", self.on_auto)
+        g.add(self.s_auto)
 
         # --- Audio
         g = Adw.PreferencesGroup(title="Audio", description="Applied whenever the headset powers on")
@@ -263,7 +266,7 @@ class Win(Adw.ApplicationWindow):
         self.r_rate.set_subtitle(rate)
         surr = sink_name("tuxwell_surround") is not None
         self.r_surr.set_subtitle("Active" if surr else "Not running")
-        self.r_out.set_sensitive(dev)
+        self.r_out.set_sensitive(dev and self.conf.get("AUTO_DEFAULT", "1") != "1")
         if dev:
             d = run("pactl", "get-default-sink")[1].strip()
             want = 1 if "tuxwell_surround" in d else 0
@@ -314,6 +317,12 @@ class Win(Adw.ApplicationWindow):
                     run("amixer", "-c", str(n), "sset", f"PCM,{i}", str(v))
             self.save(HW_VOLUME=v)
         self.debounce("vol", apply)
+
+    def on_auto(self, row, _):
+        self.save(AUTO_DEFAULT=int(row.get_active()))
+        self.r_out.set_sensitive(sink_name("Audeze") is not None and not row.get_active())
+        run("systemctl", "--user", "restart", "tuxwell.service")
+        self.say("Following playback" if row.get_active() else "Output is manual")
 
     def on_hires(self, row, _):
         on = row.get_active()

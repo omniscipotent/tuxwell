@@ -14,6 +14,8 @@ HIRES=1
 SURROUND_GAIN=0.27               # per-speaker gain; 0.27 makes centred stereo as loud as the stereo output
 CENTER_DB=3                      # extra dB on the centre channel, so 5.1 dialogue matches a stereo downmix
 SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
+AUTO_DEFAULT=1                   # 1 = the default output follows playback: surround while PLAYING_APPS plays, stereo otherwise
+PLAYING_APPS='plex-bin'          # regex for the player's own stream (not its menu/UI sounds)
 # Read the config as data, never as code: only known keys, only plain values.
 if [ -f "$CONF" ]; then
   while IFS='=' read -r key val; do
@@ -25,12 +27,14 @@ if [ -f "$CONF" ]; then
       HIRES)            [[ $val =~ ^[01]$ ]] && HIRES=$val ;;
       SURROUND_GAIN)    [[ $val =~ ^[0-9]*\.?[0-9]+$ ]] && awk "BEGIN{exit !($val > 0 && $val <= 1.5)}" && SURROUND_GAIN=$val ;;
       CENTER_DB)        [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 9)}" && CENTER_DB=$val ;;
+      AUTO_DEFAULT)     [[ $val =~ ^[01]$ ]] && AUTO_DEFAULT=$val ;;
+      PLAYING_APPS)     [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && PLAYING_APPS=$val ;;
       SURROUND_APPS)    [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && SURROUND_APPS=$val ;;
     esac
   done < "$CONF"
 fi
 
-present=0; surround_pid=""; runconf=""
+present=0; surround_pid=""; runconf=""; last_play=0
 # The dongle stays on the USB bus when the headset powers off, but its audio sink disappears.
 connected() { pactl list short sinks 2>/dev/null | grep -q "Audeze"; }
 card_name() { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
@@ -75,9 +79,37 @@ route_apps() {
       fi
     done
 }
+# True while a player stream (PLAYING_APPS) is actually playing (not corked).
+is_playing() {
+  [ -n "$PLAYING_APPS" ] || return 1
+  pactl list sink-inputs | awk -v re="$PLAYING_APPS" 'BEGIN{RS="";FS="\n"} $0 ~ re && /Corked: no/ {f=1} END{exit !f}'
+}
+
+# Make the default output follow playback, so the volume keys and the volume pop-up show the right output.
+# One volume for both outputs: the output being left hands its level to the one taking over and returns to 100%.
+auto_default() {
+  [ "$AUTO_DEFAULT" = 1 ] || return 0
+  local sid aud def want lvl now
+  sid=tuxwell_surround
+  pactl list short sinks | grep -q "$sid" || return 0
+  aud=$(pactl list short sinks | awk '/Audeze/ {print $2; exit}'); [ -n "$aud" ] || return 0
+  def=$(pactl get-default-sink 2>/dev/null)
+  [ "$def" = "$sid" ] || [ "$def" = "$aud" ] || return 0     # the user chose something else: leave it
+  now=$(date +%s)
+  if is_playing; then last_play=$now; want=$sid
+  elif [ "$def" = "$sid" ] && [ $((now - last_play)) -lt 4 ]; then return 0   # hold surround briefly (episode changes)
+  else want=$aud; fi
+  [ "$def" = "$want" ] && return 0
+  lvl=$(pactl get-sink-volume "$def" | awk -F'/' 'NR==1{gsub(/ /,"",$2); print $2}')
+  if [ -n "$lvl" ]; then pactl set-sink-volume "$want" "$lvl"; pactl set-sink-volume "$def" 100%; fi
+  pactl set-default-sink "$want"
+  echo "tuxwell: default output -> $([ "$want" = "$sid" ] && echo surround || echo stereo)"
+}
+
 check() {
   if connected; then [ $present = 0 ] && { sleep 2; apply; present=1; sleep 2; }
     route_apps
+    auto_default
   else [ $present = 1 ] && { revert; present=0; }; fi
 }
 trap 'revert; exit 0' TERM INT

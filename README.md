@@ -25,7 +25,7 @@ and does it only while the headset is powered on. Turn the headphones off and ev
 | **Proper volume** | Sets the dongle's own hardware gain. It idles around -20 dB, which is why the headset feels quiet. |
 | **Hi-res audio** | Lets PipeWire switch the dongle between 48 and 96 kHz, 24-bit, to match what plays (the dongle has no 44.1 kHz mode, so 44.1 material is converted to 48). It only switches when nothing else is playing at the old rate. |
 | **Virtual 7.1 surround** | A *Tuxwell Surround (7.1)* output that renders 5.1/7.1 to your headphones using the SADIE II HRTF. |
-| **Per-app surround** | Chosen apps (Plex HTPC by default) go to surround automatically. Everything else stays stereo, so pausing a movie to do something else just works. |
+| **Per-app surround** | Chosen apps (Plex HTPC by default) go to surround automatically, and the default output follows playback: surround while Plex plays, stereo when you pause, with one volume across both. |
 | **Mic out of the way** | Optional playback-only profile, so the headset mic never gets picked as an input by mistake. |
 | **Follows the headset** | Detects the headset powering on and off, even with the dongle always plugged in. |
 | **Control panel** | A small GTK4 / libadwaita app with a tray icon (closing the window keeps it in the tray) for all of the above, plus the headset's sound preset (all 10: six built-in and four EQ slots), sidetone and game/chat mix. |
@@ -72,6 +72,8 @@ These live inside the headset and need two things:
 | `SURROUND_ENABLED` | `1` | Create the surround output |
 | `SURROUND_GAIN` | `0.27` | Level of the surround mix (also a slider in the app). 0.27 was measured to make centred stereo exactly as loud through surround as through the stereo output. |
 | `CENTER_DB` | `3` | Extra dB on the centre channel so 5.1 dialogue matches a stereo downmix. |
+| `AUTO_DEFAULT` | `1` | The default output follows playback: surround while `PLAYING_APPS` plays, stereo when it pauses. Your volume is carried across each switch. |
+| `PLAYING_APPS` | `plex-bin` | Regex for the player's own audio stream (not its menu sounds). |
 | `SURROUND_APPS` | `tv.plex.PlexHTPC\|Plex HTPC` | Regex matched against each audio stream's properties. These apps play through surround. |
 
 In Plex HTPC, set the audio speaker layout to 7.1 so it sends surround into the sink.
