@@ -58,7 +58,7 @@ def run(*args, timeout=15):
 
 
 def read_conf():
-    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.3", "CTL_PATH": ""}
+    c = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.27", "CTL_PATH": ""}
     try:
         for line in open(CFG):
             m = re.match(r'\s*([A-Z_]+)=(.*)', line)
@@ -274,11 +274,25 @@ class Win(Adw.ApplicationWindow):
         return True
 
     # audio actions
+    def sink_pct(self, name):
+        out = run("pactl", "get-sink-volume", name)[1]
+        m = re.search(r"/\s*(\d+)%", out)
+        return int(m.group(1)) if m else None
+
     def on_output(self, row, _):
-        target = sink_name("maxwell_surround") if row.get_selected() == 1 else sink_name("Audeze")
-        if not target:
+        to_surround = row.get_selected() == 1
+        target = sink_name("maxwell_surround") if to_surround else sink_name("Audeze")
+        other = sink_name("Audeze") if to_surround else sink_name("maxwell_surround")
+        if not target or not other:
             self.say("That output isn't available right now")
             return
+        # One volume for both: the sink you are leaving hands its level to the one you switch to
+        # and goes back to 100%, so the two stages never stack and stereo/surround stay equally loud.
+        old = run("pactl", "get-default-sink")[1].strip()
+        level = self.sink_pct(old) if old in (target, other) else None
+        if level is not None and old != target:
+            run("pactl", "set-sink-volume", target, f"{level}%")
+            run("pactl", "set-sink-volume", old, "100%")
         run("pactl", "set-default-sink", target)
         for line in run("pactl", "list", "short", "sink-inputs")[1].splitlines():
             run("pactl", "move-sink-input", line.split("\t")[0], target)

@@ -11,7 +11,8 @@ RATES="48000 96000"
 DISABLE_MIC=1                   # 1 = playback-only card profile (headset mic hidden)
 SURROUND_ENABLED=1
 HIRES=1
-SURROUND_GAIN=0.3                # per-speaker gain in the surround mix (0.125 = very safe, 0.4+ = loud)
+SURROUND_GAIN=0.27               # per-speaker gain; 0.27 makes centred stereo as loud as the stereo output
+CENTER_DB=3                      # extra dB on the centre channel, so 5.1 dialogue matches a stereo downmix
 SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
 # Read the config as data, never as code: only known keys, only plain values.
 if [ -f "$CONF" ]; then
@@ -23,6 +24,7 @@ if [ -f "$CONF" ]; then
       SURROUND_ENABLED) [[ $val =~ ^[01]$ ]] && SURROUND_ENABLED=$val ;;
       HIRES)            [[ $val =~ ^[01]$ ]] && HIRES=$val ;;
       SURROUND_GAIN)    [[ $val =~ ^[0-9]*\.?[0-9]+$ ]] && awk "BEGIN{exit !($val > 0 && $val <= 1.5)}" && SURROUND_GAIN=$val ;;
+      CENTER_DB)        [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 9)}" && CENTER_DB=$val ;;
       SURROUND_APPS)    [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && SURROUND_APPS=$val ;;
     esac
   done < "$CONF"
@@ -41,7 +43,10 @@ apply() {
   [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
   if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then
     runconf="${XDG_RUNTIME_DIR:-/tmp}/maxwell-linux-surround.conf"
-    sed -E "s/gain = [0-9.]+/gain = $SURROUND_GAIN/g" "$SURROUND" > "$runconf"
+    awk -v g="$SURROUND_GAIN" -v db="$CENTER_DB" '
+      /name = spFC/ { fc = 1 }
+      /gain = [0-9.]+/ { v = g; if (fc) { v = g * 10 ^ (db / 20); fc = 0 }; sub(/gain = [0-9.]+/, sprintf("gain = %.4f", v)) }
+      { print }' "$SURROUND" > "$runconf"
     pipewire -c "$runconf" & surround_pid=$!
   fi
   echo "maxwell-linux: applied"
