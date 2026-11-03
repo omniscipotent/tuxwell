@@ -11,6 +11,7 @@ RATES="48000 96000"
 DISABLE_MIC=1                   # 1 = playback-only card profile (headset mic hidden)
 SURROUND_ENABLED=1
 HIRES=1
+SURROUND_GAIN=0.3                # per-speaker gain in the surround mix (0.125 = very safe, 0.4+ = loud)
 SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
 # Read the config as data, never as code: only known keys, only plain values.
 if [ -f "$CONF" ]; then
@@ -21,6 +22,7 @@ if [ -f "$CONF" ]; then
       DISABLE_MIC)      [[ $val =~ ^[01]$ ]] && DISABLE_MIC=$val ;;
       SURROUND_ENABLED) [[ $val =~ ^[01]$ ]] && SURROUND_ENABLED=$val ;;
       HIRES)            [[ $val =~ ^[01]$ ]] && HIRES=$val ;;
+      SURROUND_GAIN)    [[ $val =~ ^[0-9]*\.?[0-9]+$ ]] && awk "BEGIN{exit !($val > 0 && $val <= 1.5)}" && SURROUND_GAIN=$val ;;
       SURROUND_APPS)    [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && SURROUND_APPS=$val ;;
     esac
   done < "$CONF"
@@ -33,11 +35,15 @@ card_name() { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
 alsa_card() { awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null; }
 
 apply() {
-  local card n; card=$(card_name); n=$(alsa_card)
+  local card n runconf; card=$(card_name); n=$(alsa_card)
   [ "$DISABLE_MIC" = 1 ] && [ -n "$card" ] && pactl set-card-profile "$card" output:iec958-stereo 2>/dev/null
   if [ -n "$n" ]; then amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null; amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null; fi
   [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
-  if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then pipewire -c "$SURROUND" & surround_pid=$!; fi
+  if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$SURROUND" ]; then
+    runconf="${XDG_RUNTIME_DIR:-/tmp}/maxwell-linux-surround.conf"
+    sed -E "s/gain = [0-9.]+/gain = $SURROUND_GAIN/g" "$SURROUND" > "$runconf"
+    pipewire -c "$runconf" & surround_pid=$!
+  fi
   echo "maxwell-linux: applied"
 }
 revert() {

@@ -70,6 +70,7 @@ These live inside the headset and need two things:
 | `HIRES` | `1` | Allow 48 / 96 kHz switching |
 | `DISABLE_MIC` | `1` | Playback-only card profile |
 | `SURROUND_ENABLED` | `1` | Create the surround output |
+| `SURROUND_GAIN` | `0.3` | Level of the surround mix. Raise it if surround sounds quiet next to stereo (0.4 is loud), lower it if loud scenes distort. |
 | `SURROUND_APPS` | `tv.plex.PlexHTPC\|Plex HTPC` | Regex matched against each audio stream's properties. These apps play through surround. |
 
 In Plex HTPC, set the audio speaker layout to 7.1 so it sends surround into the sink.
