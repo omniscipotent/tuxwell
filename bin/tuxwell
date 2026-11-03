@@ -70,7 +70,9 @@ route_apps() {
     $0 ~ re { hit=1 }
     END { if (idx != "" && hit) print idx }' | while read -r idx; do
       cur=$(pactl list short sink-inputs | awk -v i="$idx" '$1==i {print $2}')
-      [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" tuxwell_surround 2>/dev/null
+      if [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" tuxwell_surround 2>/dev/null; then
+        echo "tuxwell: moved stream $idx to surround"
+      fi
     done
 }
 check() {
@@ -80,4 +82,12 @@ check() {
 }
 trap 'revert; exit 0' TERM INT
 check
-pactl subscribe | grep --line-buffered -E "'(new|remove)' on (sink|card|sink-input) " | while read -r _; do check; done
+# React to streams, sinks and cards appearing, changing or going away. A stream's properties (such as the
+# app name) can arrive just after it is created, so changes matter too. Bursts are coalesced, and a
+# re-check every 5 s catches anything missed.
+pactl subscribe | grep --line-buffered -E "'(new|change|remove)' on (sink|card|sink-input) " | while true; do
+  read -r -t 5 _; rc=$?
+  [ "$rc" -eq 1 ] && break                                  # the event stream ended
+  [ "$rc" -eq 0 ] && while read -r -t 0.3 _; do :; done     # coalesce a burst of events
+  check
+done
