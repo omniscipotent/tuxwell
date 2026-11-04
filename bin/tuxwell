@@ -1,143 +1,260 @@
 #!/usr/bin/env bash
-# tuxwell: applies Audeze Maxwell settings only while the dongle/headset is connected,
-# and undoes them when it is unplugged. Runs as a systemd user service.
+# tuxwell: the background service. Runs as a systemd *user* service (see systemd/tuxwell.service).
+#
+# What it does
+#   While the Audeze headset is powered on it applies Tuxwell's settings; when the headset powers off it undoes them:
+#     - sets the dongle's hardware volume and hides the headset microphone
+#     - lets PipeWire switch between 48 and 96 kHz
+#     - starts the virtual 7.1 surround output as a separate PipeWire client (never restarts PipeWire itself)
+#     - sends chosen apps (SURROUND_APPS, Plex HTPC by default) to that surround output
+#     - makes the default output follow playback: surround while the player plays, stereo when it pauses
+#
+# How it knows the headset is on
+#   The USB dongle stays plugged in when the headset powers off, but its audio sink disappears. So "connected" means
+#   "a sink named Audeze exists" (see connected()).
+#
+# How it is structured
+#   settings -> small helpers -> apply()/revert() -> route_apps()/auto_default() -> check() -> main() event loop.
+#   Each check() takes ONE snapshot of PipeWire's state (sinks, streams, default output) and every function reads that
+#   snapshot, so a check costs 3 `pactl` calls, however many streams there are.
+#
+# Testing
+#   The file can be sourced without running anything: `TUXWELL_LIB=1 source bin/tuxwell` (tests/test_service.py does this
+#   and replaces `pactl` with a fake).
+#
+# Settings live in ~/.config/tuxwell/tuxwell.conf (docs/SETTINGS.md). The file is read as DATA, never executed.
 set -u
-umask 077
+umask 077   # the files it creates (the rendered surround config) are private to the user
+
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/tuxwell.conf"
 DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/tuxwell"
 TEMPLATE="$DATA_ROOT/surround.conf.in"
-# defaults (override in tuxwell.conf)
-HW_VOLUME=86                    # dongle hardware PCM, 0-96 (1 step = 1 dB, 96 = 0 dB)
-RATES="48000 96000"
-DISABLE_MIC=1                   # 1 = playback-only card profile (headset mic hidden)
-SURROUND_ENABLED=1
-HIRES=1
-SURROUND_GAIN=0.27               # per-speaker gain; 0.27 makes centred stereo as loud as the stereo output
-LFE_DB=10                        # lift the bass (LFE) channel of 5.1/7.1 content, dB. A cinema plays it ~10 dB hotter than the mains; 0 = leave it
-BASS_DB=0                        # extra bass on everything in the surround output (low shelf at 105 Hz), dB
-CENTER_DB=3                      # extra dB on the centre channel, so 5.1 dialogue matches a stereo downmix
-SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'
-HRTF=D1_48K_24bit_256tap_FIR_SOFA.sofa   # head-response file in ~/.local/share/tuxwell/hrtf (see tuxwell-hrtf)
-EQ=off                           # headphone correction applied to the surround output: off, or a profile id (see data/eq/catalog.tsv)
-AUTO_DEFAULT=1                   # 1 = the default output follows playback: surround while PLAYING_APPS plays, stereo otherwise
-PLAYING_APPS='plex-bin'          # regex for the player's own stream (not its menu/UI sounds)
-# Read the config as data, never as code: only known keys, only plain values.
-if [ -f "$CONF" ]; then
+SURROUND_SINK="tuxwell_surround"                       # node name given to the virtual surround output
+DEFAULT_HRTF="D1_48K_24bit_256tap_FIR_SOFA.sofa"
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Settings: defaults, then load_settings() overrides them from $CONF
+# ---------------------------------------------------------------------------------------------------------------------
+HW_VOLUME=86              # dongle hardware gain, 0-96 (1 step = 1 dB, 96 = 0 dB = loudest)
+RATES="48000 96000"       # sample rates PipeWire may switch between (the dongle has no 44.1 kHz mode)
+DISABLE_MIC=1             # 1 = playback-only card profile, so the headset mic never shows up as an input
+HIRES=1                   # 1 = allow the rate switching above
+SURROUND_ENABLED=1        # 1 = start the virtual surround output
+SURROUND_GAIN=0.27        # per-speaker gain; 0.27 was measured to make centred stereo as loud as the stereo output
+CENTER_DB=3               # extra dB on the centre channel so 5.1 dialogue matches a stereo downmix
+LFE_DB=10                 # lift for the bass (LFE) channel of 5.1/7.1 content; a cinema plays it ~10 dB above the others
+BASS_DB=0                 # extra bass on everything in surround (low shelf at 105 Hz)
+HRTF=$DEFAULT_HRTF        # head-response file in $DATA_ROOT/hrtf (change with tuxwell-hrtf)
+EQ=off                    # headphone correction: "off", or a profile id from data/eq/catalog.tsv
+SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC'   # regex matched against each stream's properties: these apps get surround
+AUTO_DEFAULT=1            # 1 = the default output follows playback
+PLAYING_APPS='plex-bin'   # regex for the player's own audio stream (its menu/UI sounds must not count as "playing")
+
+# Runtime state (not settings)
+present=0                 # 1 while we consider the headset connected and have applied our settings
+surround_pid=""           # PID of the surround PipeWire client we started
+runconf=""                # path of the rendered surround config that client is using
+last_play=0               # epoch second when playback was last seen (used to hold surround between episodes)
+SINKS="" INPUTS="" DEFAULT_SINK=""   # the per-check snapshot of PipeWire state (see snapshot())
+
+# Validators. Each returns 0 when the value is acceptable. Numbers go to awk as variables, never into its program text.
+is_flag()     { [[ $1 =~ ^[01]$ ]]; }
+is_int_max()  { [[ $1 =~ ^[0-9]+$ ]] && [ "$1" -le "$2" ]; }                                   # integer in [0, max]
+is_num_max()  { [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v v="$1" -v m="$2" 'BEGIN{exit !(v<=m)}'; }  # number in [0, max]
+is_regex_ok() { [[ $1 =~ ^[A-Za-z0-9\ ._\|-]*$ ]]; }                                           # app lists: letters, digits, space . _ | -
+
+# load_settings: read $CONF line by line. Only known keys with plain, valid values are accepted; anything else is
+# ignored and the default stays. Surrounding spaces, quotes and a Windows line ending are tolerated.
+load_settings() {
+  [ -f "$CONF" ] || return 0
+  local key val
   while IFS='=' read -r key val; do
-    val=${val#"${val%%[![:space:]]*}"}; val=${val%"${val##*[![:space:]]}"}   # trim spaces and a trailing CR
-    val=${val%\'}; val=${val#\'}; val=${val%\"}; val=${val#\"}
+    val=${val#"${val%%[![:space:]]*}"}; val=${val%"${val##*[![:space:]]}"}   # trim whitespace (including a trailing CR)
+    val=${val%\'}; val=${val#\'}; val=${val%\"}; val=${val#\"}               # strip one pair of quotes
     case "$key" in
-      HW_VOLUME)        [[ $val =~ ^[0-9]+$ ]] && [ "$val" -le 96 ] && HW_VOLUME=$val ;;
-      DISABLE_MIC)      [[ $val =~ ^[01]$ ]] && DISABLE_MIC=$val ;;
-      SURROUND_ENABLED) [[ $val =~ ^[01]$ ]] && SURROUND_ENABLED=$val ;;
-      HIRES)            [[ $val =~ ^[01]$ ]] && HIRES=$val ;;
-      SURROUND_GAIN)    [[ $val =~ ^[0-9]*\.?[0-9]+$ ]] && awk "BEGIN{exit !($val > 0 && $val <= 1.5)}" && SURROUND_GAIN=$val ;;
-      LFE_DB)           [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 24)}" && LFE_DB=$val ;;
-      BASS_DB)          [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 12)}" && BASS_DB=$val ;;
-      CENTER_DB)        [[ $val =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($val <= 9)}" && CENTER_DB=$val ;;
-      HRTF)             [[ $val =~ ^[A-Za-z0-9._-]+\.sofa$ ]] && HRTF=$val ;;
-      EQ)               [[ $val =~ ^(off|[a-z0-9-]+)$ ]] && EQ=$val ;;
-      AUTO_DEFAULT)     [[ $val =~ ^[01]$ ]] && AUTO_DEFAULT=$val ;;
-      PLAYING_APPS)     [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && PLAYING_APPS=$val ;;
-      SURROUND_APPS)    [[ $val =~ ^[A-Za-z0-9\ ._\|-]*$ ]] && SURROUND_APPS=$val ;;
+      HW_VOLUME)        is_int_max "$val" 96 && HW_VOLUME=$val ;;
+      DISABLE_MIC)      is_flag "$val" && DISABLE_MIC=$val ;;
+      SURROUND_ENABLED) is_flag "$val" && SURROUND_ENABLED=$val ;;
+      HIRES)            is_flag "$val" && HIRES=$val ;;
+      AUTO_DEFAULT)     is_flag "$val" && AUTO_DEFAULT=$val ;;
+      SURROUND_GAIN)    is_num_max "$val" 1.5 && awk -v v="$val" 'BEGIN{exit !(v>0)}' && SURROUND_GAIN=$val ;;
+      LFE_DB)           is_num_max "$val" 24 && LFE_DB=$val ;;
+      BASS_DB)          is_num_max "$val" 12 && BASS_DB=$val ;;
+      CENTER_DB)        is_num_max "$val" 9 && CENTER_DB=$val ;;
+      HRTF)             [[ $val =~ ^[A-Za-z0-9._-]+\.sofa$ ]] && HRTF=$val ;;      # a file NAME only, never a path
+      EQ)               [[ $val =~ ^(off|[a-z0-9-]+)$ ]] && EQ=$val ;;              # a profile id, never a path
+      PLAYING_APPS)     is_regex_ok "$val" && PLAYING_APPS=$val ;;
+      SURROUND_APPS)    is_regex_ok "$val" && SURROUND_APPS=$val ;;
     esac
   done < "$CONF"
-fi
+}
 
-present=0; surround_pid=""; runconf=""; last_play=0
-# The dongle stays on the USB bus when the headset powers off, but its audio sink disappears.
-connected() { pactl list short sinks 2>/dev/null | grep -q "Audeze"; }
-card_name() { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
-alsa_card() { awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null; }
+# ---------------------------------------------------------------------------------------------------------------------
+# State: one snapshot per check, and small helpers that read it
+# ---------------------------------------------------------------------------------------------------------------------
+snapshot() {
+  SINKS=$(pactl list short sinks 2>/dev/null)
+  INPUTS=$(pactl list sink-inputs 2>/dev/null)
+  DEFAULT_SINK=$(pactl get-default-sink 2>/dev/null)
+}
+
+connected()   { grep -q "Audeze" <<< "$SINKS"; }                                   # see "How it knows the headset is on"
+headset_sink(){ awk '/Audeze/ {print $2; exit}' <<< "$SINKS"; }                    # node name of the headset's own sink
+sink_id()     { awk -v n="$1" '$2 == n {print $1; exit}' <<< "$SINKS"; }           # numeric id of a sink, by node name
+card_name()   { pactl list short cards | awk '/Audeze/ {print $2; exit}'; }
+alsa_card()   { awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null; }   # ALSA card number
+
+# ---------------------------------------------------------------------------------------------------------------------
+# apply / revert: what happens when the headset powers on / off
+# ---------------------------------------------------------------------------------------------------------------------
+
+# start_surround: render the surround config (head response, gains, optional correction) and run it as its own
+# PipeWire client. Rendering is done by tuxwell-render-surround; the config goes to a private temp file whose name must
+# end in .conf (PipeWire refuses anything else).
+start_surround() {
+  [ "$SURROUND_ENABLED" = 1 ] && [ -f "$TEMPLATE" ] || return 0
+  local hrtf_path eqfile target render args
+  hrtf_path="$DATA_ROOT/hrtf/$HRTF"
+  [ -f "$hrtf_path" ] || hrtf_path="$DATA_ROOT/hrtf/$DEFAULT_HRTF"            # chosen set missing: fall back to the default
+  eqfile=""; [ "$EQ" != off ] && [ -f "$DATA_ROOT/eq/$EQ.txt" ] && eqfile="$DATA_ROOT/eq/$EQ.txt"
+  target=$(headset_sink)
+  render=$(command -v tuxwell-render-surround || echo "$HOME/.local/bin/tuxwell-render-surround")
+  runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxwell-surround.XXXXXX") || return 0
+  args=(--template "$TEMPLATE" --hrtf "$hrtf_path" --gain "$SURROUND_GAIN" --center-db "$CENTER_DB"
+        --lfe-db "$LFE_DB" --bass-db "$BASS_DB" --target "$target")
+  [ -n "$eqfile" ] && args+=(--eq "$eqfile")
+  if "$render" "${args[@]}" > "$runconf"; then
+    pipewire -c "$runconf" & surround_pid=$!
+  else
+    echo "tuxwell: could not build the surround config"
+    rm -f "$runconf"; runconf=""
+  fi
+}
 
 apply() {
-  local card n; card=$(card_name); n=$(alsa_card)
+  local card n
+  card=$(card_name); n=$(alsa_card)
+  # Playback-only profile: hides the headset's mono microphone from apps (users have a separate mic).
   [ "$DISABLE_MIC" = 1 ] && [ -n "$card" ] && pactl set-card-profile "$card" output:iec958-stereo 2>/dev/null
-  if [ -n "$n" ]; then amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null; amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null; fi
-  [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
-  if [ "$SURROUND_ENABLED" = 1 ] && [ -f "$TEMPLATE" ]; then
-    local hrtf_path eqfile target render args
-    runconf=$(mktemp --suffix=.conf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxwell-surround.XXXXXX") || return
-    hrtf_path="$DATA_ROOT/hrtf/$HRTF"
-    [ -f "$hrtf_path" ] || hrtf_path="$DATA_ROOT/hrtf/D1_48K_24bit_256tap_FIR_SOFA.sofa"
-    eqfile=""; [ "$EQ" != off ] && [ -f "$DATA_ROOT/eq/$EQ.txt" ] && eqfile="$DATA_ROOT/eq/$EQ.txt"
-    target=$(pactl list short sinks | awk '/Audeze/ {print $2; exit}')
-    render=$(command -v tuxwell-render-surround || echo "$HOME/.local/bin/tuxwell-render-surround")
-    args=(--template "$TEMPLATE" --hrtf "$hrtf_path" --gain "$SURROUND_GAIN" --center-db "$CENTER_DB" --lfe-db "$LFE_DB" --bass-db "$BASS_DB" --target "$target")
-    [ -n "$eqfile" ] && args+=(--eq "$eqfile")
-    if "$render" "${args[@]}" > "$runconf"; then
-      pipewire -c "$runconf" & surround_pid=$!
-    else
-      echo "tuxwell: could not build the surround config"; rm -f "$runconf"; runconf=""
-    fi
+  # The dongle exposes two PCM controls (game and chat); both are set. Its idle level (~-20 dB) is why the headset is quiet.
+  if [ -n "$n" ]; then
+    amixer -c "$n" sset 'PCM',0 "$HW_VOLUME" >/dev/null
+    amixer -c "$n" sset 'PCM',1 "$HW_VOLUME" >/dev/null
   fi
+  [ "$HIRES" = 1 ] && pw-metadata -n settings 0 clock.allowed-rates "[ $RATES ]" >/dev/null
+  start_surround
   echo "tuxwell: applied"
 }
+
 revert() {
-  [ -n "$surround_pid" ] && kill "$surround_pid" 2>/dev/null; surround_pid=""
-  [ -n "$runconf" ] && rm -f "$runconf"; runconf=""
+  [ -n "$surround_pid" ] && kill "$surround_pid" 2>/dev/null
+  surround_pid=""
+  [ -n "$runconf" ] && rm -f "$runconf"
+  runconf=""
   pw-metadata -n settings 0 clock.allowed-rates "[ 48000 ]" >/dev/null
   echo "tuxwell: reverted"
 }
 
-# Send streams from chosen apps (SURROUND_APPS, a regex matched against each stream's properties)
-# to the surround sink. Everything else stays on the default output (stereo).
+# ---------------------------------------------------------------------------------------------------------------------
+# Routing and default output (read the snapshot; change state only through pactl)
+# ---------------------------------------------------------------------------------------------------------------------
+
+# route_apps: send streams from SURROUND_APPS to the surround sink. A stream matches when the regex matches ANYWHERE in
+# its property block, so it can be an app name, a binary or a Flatpak id. Everything else stays where it is.
 route_apps() {
   [ -n "$SURROUND_APPS" ] || return 0
   local sid idx cur
-  sid=$(pactl list short sinks | awk '$2=="tuxwell_surround" {print $1}')
-  [ -n "$sid" ] || return 0
-  pactl list sink-inputs | awk -v re="$SURROUND_APPS" '
-    /^Sink Input #/ { if (idx != "" && hit) print idx; idx=substr($3,2); hit=0 }
-    $0 ~ re { hit=1 }
-    END { if (idx != "" && hit) print idx }' | while read -r idx; do
-      cur=$(pactl list short sink-inputs | awk -v i="$idx" '$1==i {print $2}')
-      if [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" tuxwell_surround 2>/dev/null; then
-        echo "tuxwell: moved stream $idx to surround"
-      fi
-    done
+  sid=$(sink_id "$SURROUND_SINK"); [ -n "$sid" ] || return 0
+  # One awk pass over the snapshot prints "<stream id> <sink it is on>" for every matching stream.
+  while read -r idx cur; do
+    if [ "$cur" != "$sid" ] && pactl move-sink-input "$idx" "$SURROUND_SINK" 2>/dev/null; then
+      echo "tuxwell: moved stream $idx to surround"
+    fi
+  done < <(awk -v re="$SURROUND_APPS" '
+      /^Sink Input #/ { if (id != "" && hit) print id, sink; id = substr($3, 2); sink = ""; hit = 0 }
+      /^\tSink: /      { sink = $2 }
+      $0 ~ re         { hit = 1 }
+      END             { if (id != "" && hit) print id, sink }' <<< "$INPUTS")
 }
-# True while a player stream (PLAYING_APPS) is actually playing (not corked).
+
+# is_playing: true while the PLAYING_APPS stream is actually playing (not corked). The player's own stream is matched
+# on purpose: apps like Plex keep a second "menu" stream active while the video is paused.
 is_playing() {
   [ -n "$PLAYING_APPS" ] || return 1
-  pactl list sink-inputs | awk -v re="$PLAYING_APPS" 'BEGIN{RS="";FS="\n"} $0 ~ re && /Corked: no/ {f=1} END{exit !f}'
+  awk -v re="$PLAYING_APPS" 'BEGIN{RS=""; FS="\n"} $0 ~ re && /Corked: no/ {found = 1} END{exit !found}' <<< "$INPUTS"
 }
 
-# Make the default output follow playback, so the volume keys and the volume pop-up show the right output.
-# One volume for both outputs: the output being left hands its level to the one taking over and returns to 100%.
+# auto_default: make the default output follow playback, so the volume keys and the volume pop-up always show the output
+# in use. Only switches between the headset's stereo sink and the surround sink; if the user chose another output we leave it.
+#
+# One volume across both outputs: the two sinks are in series (surround feeds the headset sink), so their volumes would
+# multiply. The output we leave therefore hands its level to the one taking over and returns to 100%.
 auto_default() {
   [ "$AUTO_DEFAULT" = 1 ] || return 0
-  local sid aud def want lvl now
-  sid=tuxwell_surround
-  pactl list short sinks | grep -q "$sid" || return 0
-  aud=$(pactl list short sinks | awk '/Audeze/ {print $2; exit}'); [ -n "$aud" ] || return 0
-  def=$(pactl get-default-sink 2>/dev/null)
-  [ "$def" = "$sid" ] || [ "$def" = "$aud" ] || return 0     # the user chose something else: leave it
-  now=$(date +%s)
-  if is_playing; then last_play=$now; want=$sid
-  elif [ "$def" = "$sid" ] && [ $((now - last_play)) -lt 4 ]; then return 0   # hold surround briefly (episode changes)
-  else want=$aud; fi
-  [ "$def" = "$want" ] && return 0
-  lvl=$(pactl get-sink-volume "$def" | awk -F'/' 'NR==1{gsub(/ /,"",$2); print $2}')
-  if [ -n "$lvl" ]; then pactl set-sink-volume "$want" "$lvl"; pactl set-sink-volume "$def" 100%; fi
+  local aud want lvl now
+  aud=$(headset_sink)
+  [ -n "$aud" ] && [ -n "$(sink_id "$SURROUND_SINK")" ] || return 0
+  [ "$DEFAULT_SINK" = "$SURROUND_SINK" ] || [ "$DEFAULT_SINK" = "$aud" ] || return 0
+  printf -v now '%(%s)T' -1                                                    # epoch seconds, no process spawned
+  if is_playing; then
+    last_play=$now; want=$SURROUND_SINK
+  elif [ "$DEFAULT_SINK" = "$SURROUND_SINK" ] && [ $((now - last_play)) -lt 4 ]; then
+    return 0                                                                   # just stopped: hold surround for a moment
+  else
+    want=$aud
+  fi
+  [ "$DEFAULT_SINK" = "$want" ] && return 0
+  lvl=$(pactl get-sink-volume "$DEFAULT_SINK" | awk -F'/' 'NR==1 {gsub(/ /, "", $2); print $2}')
+  if [ -n "$lvl" ]; then
+    pactl set-sink-volume "$want" "$lvl"
+    pactl set-sink-volume "$DEFAULT_SINK" 100%
+  fi
   pactl set-default-sink "$want"
-  echo "tuxwell: default output -> $([ "$want" = "$sid" ] && echo surround || echo stereo)"
+  echo "tuxwell: default output -> $([ "$want" = "$SURROUND_SINK" ] && echo surround || echo stereo)"
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# check / main
+# ---------------------------------------------------------------------------------------------------------------------
+
+# check: reconcile with the world. Cheap enough to run on every event and every 5 seconds.
 check() {
-  if connected; then [ $present = 0 ] && { sleep 2; apply; present=1; sleep 2; }
+  snapshot
+  if connected; then
+    if [ "$present" = 0 ]; then
+      sleep 2                       # let the sink finish appearing before touching it
+      apply; present=1
+      sleep 2                       # let the surround sink come up before routing streams to it
+      snapshot                      # the state changed under us: look again
+    fi
     route_apps
     auto_default
-  else [ $present = 1 ] && { revert; present=0; }; fi
+  elif [ "$present" = 1 ]; then
+    revert; present=0
+  fi
 }
-trap 'revert; exit 0' TERM INT
-check
-# React to streams, sinks and cards appearing, changing or going away. A stream's properties (such as the
-# app name) can arrive just after it is created, so changes matter too. Bursts are coalesced, and a
-# re-check every 5 s catches anything missed.
-pactl subscribe | grep --line-buffered -E "'(new|change|remove)' on (sink|card|sink-input) " | while true; do
-  read -r -t 5 _; rc=$?
-  [ "$rc" -eq 1 ] && break                                  # the event stream ended
-  [ "$rc" -eq 0 ] && while read -r -t 0.3 _; do :; done     # coalesce a burst of events
+
+# watch_events: run check() whenever PipeWire reports a sink, card or stream appearing, changing or going away.
+# - A stream's properties (e.g. its app name) can arrive just after it is created, so "change" events matter too.
+# - Bursts of events are coalesced (one check per burst).
+# - A check every 5 s covers anything missed.
+# The event source is read through fd 3 so this loop runs in the MAIN shell: present, surround_pid and runconf stay correct.
+watch_events() {
+  local rc
+  while true; do
+    read -r -t 5 _ <&3; rc=$?
+    [ "$rc" -eq 1 ] && break                                  # the event stream ended: exit and let systemd restart us
+    [ "$rc" -eq 0 ] && while read -r -t 0.3 _ <&3; do :; done # coalesce the burst
+    check
+  done 3< <(pactl subscribe | grep --line-buffered -E "'(new|change|remove)' on (sink|card|sink-input) ")
+}
+
+main() {
+  load_settings
+  trap 'revert; exit 0' TERM INT
   check
-done
+  watch_events
+}
+
+# Run only when executed, not when sourced (tests source this file with TUXWELL_LIB=1).
+[ -z "${TUXWELL_LIB:-}" ] && main "$@"

@@ -1,32 +1,55 @@
 #!/usr/bin/env bash
-# Prints non-personal diagnostics for bug reports and new-device / new-distro requests.
-# Read it before pasting it anywhere. It contains no usernames, hostnames or file paths.
-echo "## System"
+# tuxwell-report: print non-personal diagnostics for bug reports and new-device / new-distro requests.
+#
+# Paste the output into a GitHub issue (the app's More tab has a "Copy report" button that runs this).
+# It is deliberately limited to facts about the audio setup: no usernames, hostnames, file paths, or settings that hold paths.
+# Read it before you paste it anywhere.
+
+section() { printf '\n## %s\n' "$1"; }
+
+printf '## System\n'
 . /etc/os-release 2>/dev/null && echo "distro: ${PRETTY_NAME:-unknown}"
 echo "kernel: $(uname -r)"
 echo "pipewire: $(pipewire --version 2>/dev/null | tail -1)"
 echo "desktop: ${XDG_CURRENT_DESKTOP:-unknown} (${XDG_SESSION_TYPE:-unknown})"
-echo
-echo "## Audeze USB devices (vendor 3329)"
+
+section "Audeze USB devices (vendor 3329)"
 lsusb -d 3329: 2>/dev/null || echo "none"
-echo
-echo "## HID nodes"
+
+# The HID node is what the headset's preset / sidetone / chat-mix controls talk to.
+section "HID nodes"
 for u in /sys/class/hidraw/hidraw*/device/uevent; do
-  grep -q -i ":00003329:" "$u" 2>/dev/null && echo "$(basename "$(dirname "$(dirname "$u")")") $(grep -E '^(HID_ID|HID_NAME)=' "$u" | tr '\n' ' ')"
+  grep -q -i ":00003329:" "$u" 2>/dev/null &&
+    echo "$(basename "$(dirname "$(dirname "$u")")") $(grep -E '^(HID_ID|HID_NAME)=' "$u" | tr '\n' ' ')"
 done
-echo
-echo "## ALSA cards"
+
+section "ALSA cards"
 grep -i -A1 "audeze" /proc/asound/cards 2>/dev/null || echo "none"
-echo
-echo "## Sinks"
-pactl list short sinks 2>/dev/null | awk '{print $2, $NF}' | grep -i -E "audeze|maxwell" || echo "none"
-echo
-echo "## Service"
+
+# These sinks exist only while the headset is powered on (see docs/ARCHITECTURE.md).
+section "Sinks"
+pactl list short sinks 2>/dev/null | awk '{print $2, $NF}' | grep -i -E "audeze|tuxwell" || echo "none"
+
+section "Service"
 systemctl --user is-active tuxwell 2>&1
 systemctl --user is-enabled tuxwell 2>&1
-echo "sofa plugin: $(ls /usr/lib*/spa-0.2/filter-graph/*sofa* 2>/dev/null | head -1 | sed 's#.*/##' || true)"
-echo
-echo "## Dongle volume / rates"
+sofa=$(compgen -G '/usr/lib*/spa-0.2/filter-graph/*sofa*' | head -1)          # the plugin surround needs
+echo "sofa plugin: ${sofa##*/}"
+
+# Only keys that cannot hold a path or personal text (so CTL_PATH is left out on purpose).
+section "Tuxwell settings"
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/tuxwell/tuxwell.conf"
+if [ -f "$conf" ]; then
+  grep -E '^(HW_VOLUME|HIRES|DISABLE_MIC|SURROUND_ENABLED|SURROUND_GAIN|CENTER_DB|LFE_DB|BASS_DB|HRTF|EQ|AUTO_DEFAULT)=' "$conf" | tr -d '\r'
+else
+  echo "(no settings file: defaults)"
+fi
+
+section "Dongle volume / rates"
 n=$(awk '/^ *[0-9]+ \[/ && /Audeze/ {print $1; exit}' /proc/asound/cards 2>/dev/null)
-[ -n "$n" ] && { amixer -c "$n" sget 'PCM',0 2>/dev/null | grep -m1 "Front Left:"; grep -E "Rates:" /proc/asound/card"$n"/stream0 2>/dev/null | sort -u; }
-pw-metadata -n settings 2>/dev/null | grep -E "clock.(rate|allowed-rates)"
+if [ -n "$n" ]; then
+  amixer -c "$n" sget 'PCM',0 2>/dev/null | grep -m1 "Front Left:"               # the dongle's hardware gain
+  grep -E "Rates:" "/proc/asound/card$n/stream0" 2>/dev/null | sort -u            # sample rates it supports
+fi
+pw-metadata -n settings 2>/dev/null | grep -E "clock.(rate|allowed-rates)"       # what PipeWire may switch between
+exit 0

@@ -10,9 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck -S warning bin/tuxwell bin/tuxwell-report bin/tuxwell-hrtf install.sh
+        run: shellcheck -S warning bin/tuxwell bin/tuxwell-report bin/tuxwell-hrtf install.sh tools/test-install.sh
       - name: Python syntax
         run: python3 -m py_compile gui/tuxwell-gui bin/tuxwell-test-sound bin/tuxwell-render-surround tools/fit-eq.py
+      - name: Pyflakes
+        run: pip install -q pyflakes && python3 -m pyflakes gui/tuxwell-gui bin/tuxwell-render-surround bin/tuxwell-test-sound tools/fit-eq.py tests
       - name: Unit tests
         run: python3 -m unittest discover -s tests
       - name: Validate desktop file

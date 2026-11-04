@@ -1,21 +1,54 @@
 #!/usr/bin/env python3
-"""tuxwell-gui: control panel for Audeze Maxwell headsets on Linux (GTK4 + libadwaita)."""
+"""tuxwell-gui: the Tuxwell control panel (GTK4 + libadwaita) and tray icon.
+
+What this program is
+    A thin front end. The real work is done by other pieces, and this window only changes settings and shows state:
+      - bin/tuxwell            the background service. It reads ~/.config/tuxwell/tuxwell.conf, so most controls here
+                               just write that file and restart the service.
+      - bin/tuxwell-hrtf       switches the head-response set (downloads it if needed).
+      - bin/tuxwell-test-sound plays the test sound used to compare head responses.
+      - audezeforlinux         optional third-party tool used to READ the headset's battery, sidetone and chat mix.
+      - pactl / amixer         used directly for the immediate effects (volume, output switching, mic profile).
+
+Layout of this file
+    1. constants and small pure helpers (settings, catalogs, audio state, output-switch plan, HID preset write)
+    2. Win       the main window: four tabs (Listen, Surround, Headset, More)
+    3. Tray      a minimal StatusNotifierItem tray icon (the protocol Discord, qBittorrent, etc. use)
+    4. App       the application object (single instance; closing the window hides it to the tray)
+
+Threading rule
+    The GTK main loop must never wait on a subprocess (the window would freeze). Anything that runs pactl, amixer,
+    systemctl or another program goes through bg(), which runs it in a worker thread and delivers the result back to
+    the main loop. Only the handful of tiny /proc and file reads happen directly.
+"""
 import fcntl, glob, os, re, shlex, subprocess, threading
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
+# ----------------------------------------------------------------------------------------------------------------------
+# Paths and constants
+# ----------------------------------------------------------------------------------------------------------------------
 CFG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "tuxwell")
-CFG = os.path.join(CFG_DIR, "tuxwell.conf")
-RATES_ON = "48000 96000"
+CFG = os.path.join(CFG_DIR, "tuxwell.conf")                  # the settings file shared with bin/tuxwell
+DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "tuxwell")
+CATALOG = os.path.join(DATA_DIR, "hrtf-catalog.tsv")        # head-response sets (written by install.sh)
+EQ_CATALOG = os.path.join(DATA_DIR, "eq", "catalog.tsv")    # headphone-correction profiles
+DEFAULT_CTL = os.path.join(DATA_DIR, "audezeforlinux", "maxwell_ctl.py")   # where the README tells people to clone it
+SURROUND_SINK = "tuxwell_surround"                          # node name of the virtual surround output (see bin/tuxwell)
+FILTER_STREAM = re.compile(r"tuxwell_surround|Tuxwell Surround")   # marks the surround filter's own output stream
+RATES_ON = "48000 96000"                                    # the dongle has no 44.1 kHz mode
 PRESETS = ["Audeze", "Treble Boost", "Bass Boost", "Immersive", "Competition", "Footsteps",
-           "EQ 1 (custom)", "EQ 2 (custom)", "EQ 3 (custom)", "EQ 4 (custom)"]  # value sent = position + 1
-DONGLE_HID = "3329:00004B28"  # Maxwell 2 Xbox dongle: the only model tested. See docs/DEVICES.md to add others
-DEFAULT_CTL = os.path.expanduser("~/.local/share/tuxwell/audezeforlinux/maxwell_ctl.py")
+           "EQ 1 (custom)", "EQ 2 (custom)", "EQ 3 (custom)", "EQ 4 (custom)"]   # headset preset N is sent as PRESETS index + 1
+DONGLE_HID = "3329:00004B28"  # Maxwell 2 Xbox dongle (vendor:product as the kernel prints it); the only model tested. See docs/DEVICES.md
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# Headset presets (HID)
+# ----------------------------------------------------------------------------------------------------------------------
 def dongle_hidraw():
+    """Path of the dongle's /dev/hidrawN node, or None. Matched by USB id in the kernel's uevent files."""
     for u in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
         try:
             if DONGLE_HID in open(u).read().upper():
@@ -26,13 +59,17 @@ def dongle_hidraw():
 
 
 def select_preset(value):
-    """Select preset 1..10 with a 62-byte report sent as a control SET_REPORT
-    (HIDIOCSOUTPUT). The headset ignores built-in presets when this is sent as a plain hidraw write."""
+    """Select headset preset 1..10 (see PRESETS). Returns True if the report was sent.
+
+    The report is the 62-byte HID output report [06 09 80 | 05 5A 05 00 00 09 00 00 <N>] zero padded. It MUST go out as a
+    USB control SET_REPORT (the HIDIOCSOUTPUT ioctl): sent as a plain write() to the hidraw node, a Maxwell 2 only accepts
+    1..4 (as EQ slots) and ignores the built-in presets. See docs/PRESETS.md. Needs the udev rule (udev/70-audeze-maxwell.rules).
+    """
     path = dongle_hidraw()
     if not path or not 1 <= value <= 10:
         return False
     report = bytes([0x06, 0x09, 0x80, 0x05, 0x5A, 0x05, 0x00, 0x00, 0x09, 0x00, 0x00, value]).ljust(62, b"\x00")
-    req = (3 << 30) | (len(report) << 16) | (ord("H") << 8) | 0x0B  # HIDIOCSOUTPUT
+    req = (3 << 30) | (len(report) << 16) | (ord("H") << 8) | 0x0B   # the ioctl number HIDIOCSOUTPUT(len), built by hand
     try:
         fd = os.open(path, os.O_RDWR)
         try:
@@ -44,34 +81,36 @@ def select_preset(value):
         return False
 
 
-CATALOG = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "tuxwell", "hrtf-catalog.tsv")
+# ----------------------------------------------------------------------------------------------------------------------
+# Catalogs, small helpers, background work
+# ----------------------------------------------------------------------------------------------------------------------
+def read_tsv(path):
+    """Rows of a tab-separated catalog file (blank lines skipped). A missing file gives []."""
+    try:
+        with open(path) as fh:
+            return [line.rstrip("\n").split("\t") for line in fh if line.strip()]
+    except OSError:
+        return []
 
 
 def read_catalog():
-    """[(id, label, zip, inner, sha256)] of the available head-response sets."""
-    try:
-        return [l.rstrip("\n").split("\t") for l in open(CATALOG) if l.strip()]
-    except OSError:
-        return []
-
-
-EQ_CATALOG = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "tuxwell", "eq", "catalog.tsv")
+    """Head-response sets: [id, label, zip, inner file, sha256]."""
+    return read_tsv(CATALOG)
 
 
 def read_eq_catalog():
-    """[(id, label, note)] of the headphone corrections."""
-    try:
-        return [l.rstrip("\n").split("\t") for l in open(EQ_CATALOG) if l.strip()]
-    except OSError:
-        return []
+    """Headphone corrections: [id, label, note]."""
+    return read_tsv(EQ_CATALOG)
 
 
 def tilde(path):
+    """Show a path under the home folder as ~/... (keeps the user name off the screen and out of screenshots)."""
     home = os.path.expanduser("~")
     return "~" + path[len(home):] if path.startswith(home + os.sep) else path
 
 
 def run(*args, timeout=15):
+    """Run a program and return (exit code, stdout+stderr). Never raises: a missing program or a timeout gives (1, message)."""
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout + r.stderr
@@ -79,6 +118,18 @@ def run(*args, timeout=15):
         return 1, str(e)
 
 
+def bg(fn, *args, then=None, **kwargs):
+    """Run fn(*args, **kwargs) in a worker thread; if `then` is given, call then(result) on the GTK main loop afterwards."""
+    def work():
+        result = fn(*args, **kwargs)
+        if then:
+            GLib.idle_add(then, result)
+    threading.Thread(target=work, daemon=True).start()
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Settings (the file shared with bin/tuxwell)
+# ----------------------------------------------------------------------------------------------------------------------
 DEFAULTS = {"HW_VOLUME": "86", "DISABLE_MIC": "1", "SURROUND_ENABLED": "1", "HIRES": "1", "SURROUND_GAIN": "0.27",
             "LFE_DB": "10", "BASS_DB": "0", "AUTO_DEFAULT": "1", "CTL_PATH": ""}
 RANGES = {"HW_VOLUME": (0, 96, int), "SURROUND_GAIN": (0.05, 1.5, float), "LFE_DB": (0, 24, float), "BASS_DB": (0, 12, float)}
@@ -86,12 +137,14 @@ FLAGS = ("DISABLE_MIC", "SURROUND_ENABLED", "HIRES", "AUTO_DEFAULT")
 
 
 def sanitize(c):
-    """Replace any invalid setting with its default, so a typo in the file can never stop the app opening."""
+    """Replace any invalid setting with its default, so a typo in the file can never stop the app opening.
+
+    Mirrors the checks in bin/tuxwell (which also ignores invalid values) so both agree on what is valid."""
     for k, (lo, hi, kind) in RANGES.items():
+        raw = str(c.get(k, DEFAULTS[k])).strip()
         try:
-            v = kind(c.get(k, DEFAULTS[k]))
-            c[k] = str(v) if lo <= v <= hi else DEFAULTS[k]
-        except (TypeError, ValueError):
+            c[k] = raw if lo <= kind(raw) <= hi else DEFAULTS[k]     # keep exactly what was written (10 stays 10, not 10.0)
+        except ValueError:
             c[k] = DEFAULTS[k]
     for k in FLAGS:
         if c.get(k) not in ("0", "1"):
@@ -104,6 +157,7 @@ def sanitize(c):
 
 
 def read_conf():
+    """Load settings: defaults, overridden by the file, then sanitized. Unknown keys (e.g. SURROUND_APPS) are kept."""
     c = dict(DEFAULTS)
     try:
         for line in open(CFG):
@@ -116,36 +170,91 @@ def read_conf():
 
 
 def write_conf(c):
+    """Write all settings back. Values are shell-quoted so the file stays a valid KEY=value list."""
     os.makedirs(CFG_DIR, exist_ok=True)
     with open(CFG, "w") as f:
         for k, v in c.items():
             f.write(f'{k}={shlex.quote(str(v))}\n')
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# The audio system: one look at its state, and the plan for switching outputs
+# ----------------------------------------------------------------------------------------------------------------------
 def audeze_card():
-    """ALSA card number of the Audeze dongle (the card id is just 'Dongle', so match the long name)."""
+    """ALSA card number of the Audeze dongle. The card's short id is just 'Dongle', so match the long name instead."""
     try:
-        for m in re.finditer(r"^\s*(\d+) \[[^\]]*\]:\s*(.*)$", open("/proc/asound/cards").read(), re.M):
-            if "Audeze" in m.group(2):
-                return int(m.group(1))
+        with open("/proc/asound/cards") as fh:
+            for m in re.finditer(r"^\s*(\d+) \[[^\]]*\]:\s*(.*)$", fh.read(), re.M):
+                if "Audeze" in m.group(2):
+                    return int(m.group(1))
     except OSError:
         pass
     return None
 
 
-def sinks():
-    return run("pactl", "list", "short", "sinks")[1]
+def audio_state():
+    """A snapshot of the audio system, used to draw the status rows and to plan output switches.
+
+    {"sinks": {node name: id}, "headset": the headset's sink name or None, "surround": bool,
+     "default": the default sink's name, "rate": the dongle's current sample rate, e.g. "48 kHz"}
+    Runs two subprocesses, so call it from a worker thread (bg)."""
+    sinks = {}
+    for line in run("pactl", "list", "short", "sinks")[1].splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1:
+            sinks[parts[1]] = parts[0]
+    headset = next((name for name in sinks if "Audeze" in name), None)
+    rate = "-"
+    card = audeze_card()
+    if headset and card is not None:
+        try:
+            with open(f"/proc/asound/card{card}/stream0") as fh:
+                m = re.search(r"Momentary freq = (\d+) Hz", fh.read())
+            rate = f"{int(m.group(1)) / 1000:g} kHz" if m else "idle"
+        except OSError:
+            pass
+    return {"sinks": sinks, "headset": headset, "surround": SURROUND_SINK in sinks,
+            "default": run("pactl", "get-default-sink")[1].strip(), "rate": rate}
 
 
-def sink_name(match):
-    for line in sinks().splitlines():
-        p = line.split("\t")
-        if len(p) > 1 and match in p[1]:
-            return p[1]
-    return None
+def volume_percent(text):
+    """The first percentage in `pactl get-sink-volume` output, as an int, or None."""
+    m = re.search(r"/\s*(\d+)%", text)
+    return int(m.group(1)) if m else None
+
+
+def plan_output_switch(state, to_surround, level, inputs):
+    """The pactl commands (argv lists) that make surround or stereo the default output, or None if either is missing.
+
+    One volume across both outputs: the headset sink and the surround sink are in series, so their volumes would
+    multiply. The output being left therefore hands its level to the one taking over and returns to 100%.
+    Only streams that were on the output being left are moved (never the surround filter's own stream, which must
+    keep feeding the headset sink).
+
+    state:  audio_state()    level: volume % of the current default output (or None)
+    inputs: the text of `pactl list sink-inputs`
+    """
+    headset = state["headset"]
+    target, other = (SURROUND_SINK, headset) if to_surround else (headset, SURROUND_SINK)
+    if not headset or target not in state["sinks"] or other not in state["sinks"]:
+        return None
+    old = state["default"]
+    cmds = []
+    if level is not None and old in (target, other) and old != target:
+        cmds.append(["pactl", "set-sink-volume", target, f"{level}%"])
+        cmds.append(["pactl", "set-sink-volume", old, "100%"])
+    cmds.append(["pactl", "set-default-sink", target])
+    leaving = state["sinks"][other]                       # id of the output we are leaving
+    for block in re.split(r"\n(?=Sink Input #)", inputs):
+        stream = re.match(r"\s*Sink Input #(\d+)", block)
+        on = re.search(r"^\s*Sink: (\d+)", block, re.M)
+        if stream and on and on.group(1) == leaving and not FILTER_STREAM.search(block):
+            cmds.append(["pactl", "move-sink-input", stream.group(1), target])
+    return cmds
 
 
 def card_profile_name():
+    """Name of the dongle's sound card (what `pactl set-card-profile` needs), or None."""
     for line in run("pactl", "list", "short", "cards")[1].splitlines():
         p = line.split("\t")
         if len(p) > 1 and "Audeze" in p[1]:
@@ -154,11 +263,14 @@ def card_profile_name():
 
 
 class Win(Adw.ApplicationWindow):
+    """The main window. Four tabs, built in __init__; every control has an on_* handler below."""
+
     def __init__(self, app):
         super().__init__(application=app, title="Tuxwell", default_width=560, default_height=int(os.environ.get("MAXWELL_HEIGHT", "780")))
-        self.conf = read_conf()
-        self.busy = False
-        self.timer = None
+        self.conf = read_conf()               # current settings (re-read from disk on every save)
+        self.state = {}                       # latest audio_state(), filled in by poll()
+        self.polling = False                  # True while a poll is in flight, so polls never overlap
+        self.pending = {}                     # debounce timers by key (see debounce)
         view = Adw.ToolbarView()
         view.add_top_bar(Adw.HeaderBar())
         self.toast = Adw.ToastOverlay()
@@ -317,12 +429,12 @@ class Win(Adw.ApplicationWindow):
             self.set_default_size(560, int(os.environ.get("MAXWELL_HEIGHT", "780")))
             self.set_size_request(560, int(os.environ.get("MAXWELL_HEIGHT", "780")))
             GLib.timeout_add(2500, self.screenshot, shot)
-        self.pending = {}
-        self.refresh()
-        GLib.timeout_add_seconds(2, self.refresh)
+        self.poll()
+        GLib.timeout_add_seconds(2, self.poll)
         self.read_headset()
 
     def screenshot(self, path):
+        """Render the window to a PNG and quit. Only used to make the README images (MAXWELL_SCREENSHOT=path)."""
         self.set_focus(None)
         paintable = Gtk.WidgetPaintable.new(self)
         w, h = self.get_width(), self.get_height()
@@ -334,190 +446,217 @@ class Win(Adw.ApplicationWindow):
         self.get_application().quit()
         return False
 
-    # helpers
+    # ------------------------------------------------------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------------------------------------------------------
     def switch_row(self, title, sub, active, cb):
+        """A labelled on/off row. `cb(row, pspec)` is called when the user flips it."""
         r = Adw.SwitchRow(title=title, subtitle=sub)
         r.set_active(active)
         r.connect("notify::active", cb)
         return r
 
     def say(self, msg):
+        """Show a short message at the bottom of the window."""
         self.toast.add_toast(Adw.Toast(title=msg, timeout=3))
 
     def save(self, **kw):
-        c = read_conf()                      # re-read: other tools (tuxwell-hrtf) also write this file
+        """Change settings and write the file. It is re-read first because other tools (tuxwell-hrtf) also write it."""
+        c = read_conf()
         c.update({k: str(v) for k, v in kw.items()})
         self.conf = c
         write_conf(c)
 
     def debounce(self, key, fn, ms=350):
+        """Run fn() `ms` after the LAST call with this key, so dragging a slider acts once, when you stop."""
         if key in self.pending:
             GLib.source_remove(self.pending[key])
+
         def go():
             self.pending.pop(key, None)
             fn()
             return False
         self.pending[key] = GLib.timeout_add(ms, go)
 
-    # status
-    def refresh(self):
-        dev = sink_name("Audeze") is not None
+    def restart_service(self):
+        """Restart the background service so it re-reads the settings (the surround blips for a second or two)."""
+        bg(run, "systemctl", "--user", "restart", "tuxwell.service")
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Status (refreshed every 2 s by poll)
+    # ------------------------------------------------------------------------------------------------------------------
+    def poll(self):
+        """Ask for a fresh audio_state() in a worker thread, then show_status() on the main loop. Keeps the window responsive."""
+        if not self.polling:
+            self.polling = True
+            bg(audio_state, then=self.show_status)
+        return True                                  # keep the GLib timer running
+
+    def show_status(self, state):
+        """Draw the status rows from an audio_state() snapshot, and keep the output selector in step with the real default."""
+        self.polling = False
+        self.state = state
+        dev = state["headset"] is not None
         self.r_conn.set_subtitle("Connected" if dev else "Headset is off or not connected")
-        rate = "-"
-        n = audeze_card()
-        if dev and n is not None:
-            try:
-                m = re.search(r"Momentary freq = (\d+) Hz", open(f"/proc/asound/card{n}/stream0").read())
-                rate = f"{int(m.group(1))/1000:g} kHz" if m else "idle"
-            except OSError:
-                pass
-        self.r_rate.set_subtitle(rate)
-        surr = sink_name("tuxwell_surround") is not None
-        self.r_surr.set_subtitle("Active" if surr else "Not running")
+        self.r_rate.set_subtitle(state["rate"] if dev else "-")
+        self.r_surr.set_subtitle("Active" if state["surround"] else "Not running")
         self.r_out.set_sensitive(dev and self.conf.get("AUTO_DEFAULT", "1") != "1")
-        if dev:
-            d = run("pactl", "get-default-sink")[1].strip()
-            want = 1 if "tuxwell_surround" in d else 0
-            if self.r_out.get_selected() != want and d:
-                self.r_out.handler_block(self.out_id)
+        if dev and state["default"]:
+            want = 1 if SURROUND_SINK in state["default"] else 0
+            if self.r_out.get_selected() != want:
+                self.r_out.handler_block(self.out_id)      # a programmatic change must not look like a user choice
                 self.r_out.set_selected(want)
                 self.r_out.handler_unblock(self.out_id)
-        return True
 
-    # audio actions
-    def sink_pct(self, name):
-        out = run("pactl", "get-sink-volume", name)[1]
-        m = re.search(r"/\s*(\d+)%", out)
-        return int(m.group(1)) if m else None
-
+    # ------------------------------------------------------------------------------------------------------------------
+    # Listen tab
+    # ------------------------------------------------------------------------------------------------------------------
     def on_output(self, row, _):
+        """Manual output choice (only when Follow playback is off). Plans the switch in a worker thread, then runs it."""
         to_surround = row.get_selected() == 1
-        target = sink_name("tuxwell_surround") if to_surround else sink_name("Audeze")
-        other = sink_name("Audeze") if to_surround else sink_name("tuxwell_surround")
-        if not target or not other:
-            self.say("That output isn't available right now")
-            return
-        # One volume for both: the sink you are leaving hands its level to the one you switch to
-        # and goes back to 100%, so the two stages never stack and stereo/surround stay equally loud.
-        old = run("pactl", "get-default-sink")[1].strip()
-        level = self.sink_pct(old) if old in (target, other) else None
-        if level is not None and old != target:
-            run("pactl", "set-sink-volume", target, f"{level}%")
-            run("pactl", "set-sink-volume", old, "100%")
-        run("pactl", "set-default-sink", target)
-        # Move only the streams that were on the output we are leaving, and never the surround filter's own stream.
-        left = next((l.split("\t")[0] for l in run("pactl", "list", "short", "sinks")[1].splitlines()
-                     if l.split("\t")[1:2] == [other]), None)
-        for blk in re.split(r"\n(?=Sink Input #)", run("pactl", "list", "sink-inputs")[1]):
-            m = re.match(r"\s*Sink Input #(\d+)", blk)
-            on = re.search(r"^\s*Sink: (\d+)", blk, re.M)
-            if m and on and on.group(1) == left and "tuxwell_surround" not in blk:
-                run("pactl", "move-sink-input", m.group(1), target)
+
+        def work():
+            state = audio_state()
+            level = volume_percent(run("pactl", "get-sink-volume", state["default"])[1]) if state["default"] else None
+            cmds = plan_output_switch(state, to_surround, level, run("pactl", "list", "sink-inputs")[1])
+            if cmds is None:
+                return "That output isn't available right now"
+            for cmd in cmds:
+                run(*cmd)
+            return None
+        bg(work, then=lambda msg: self.say(msg) if msg else None)
 
     def on_volume(self, scale):
+        """Hardware volume slider: set both of the dongle's PCM controls, then remember it for next time."""
         v = int(scale.get_value())
+
         def apply():
-            n = audeze_card()
-            if n is None:
+            card = audeze_card()
+            if card is None:
                 self.say("Headset not connected, saved for next time")
             else:
-                for i in (0, 1):
-                    run("amixer", "-c", str(n), "sset", f"PCM,{i}", str(v))
+                bg(lambda: [run("amixer", "-c", str(card), "sset", f"PCM,{i}", str(v)) for i in (0, 1)])
             self.save(HW_VOLUME=v)
         self.debounce("vol", apply)
 
     def on_auto(self, row, _):
+        """Follow playback on/off. The service reads this setting at start, so it is restarted."""
         self.save(AUTO_DEFAULT=int(row.get_active()))
-        self.r_out.set_sensitive(sink_name("Audeze") is not None and not row.get_active())
-        run("systemctl", "--user", "restart", "tuxwell.service")
+        self.r_out.set_sensitive(self.state.get("headset") is not None and not row.get_active())
+        self.restart_service()
         self.say("Following playback" if row.get_active() else "Output is manual")
 
-    def on_hires(self, row, _):
-        on = row.get_active()
-        run("pw-metadata", "-n", "settings", "0", "clock.allowed-rates", f"[ {RATES_ON if on else '48000'} ]")
-        self.save(HIRES=int(on))
+    # ------------------------------------------------------------------------------------------------------------------
+    # Surround tab
+    # ------------------------------------------------------------------------------------------------------------------
+    def on_surround(self, row, _):
+        """Turn the virtual surround output on or off."""
+        self.save(SURROUND_ENABLED=int(row.get_active()))
+        self.restart_service()
+        self.say("Surround " + ("on" if row.get_active() else "off"))
 
-    def on_mic(self, row, _):
-        on = row.get_active()
-        card = card_profile_name()
-        if card:
-            run("pactl", "set-card-profile", card,
-                "output:iec958-stereo" if on else "output:iec958-stereo+input:mono-fallback")
-        self.save(DISABLE_MIC=int(on))
+    def _tune(self, key, value, message):
+        """Save a surround setting and restart the service once the slider has stopped moving (1.2 s)."""
+        def apply():
+            self.save(**{key: value})
+            if self.conf.get("SURROUND_ENABLED") == "1":
+                self.restart_service()
+                self.say(message)
+        self.debounce(key, apply, 1200)
 
-    def open_url(self, url):
-        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def on_gain(self, scale):
+        """Surround level slider."""
+        v = round(scale.get_value(), 2)
+        self._tune("SURROUND_GAIN", v, f"Surround level {v:g}")
 
-    def on_copy_report(self, _btn):
-        rc, out = run("tuxwell-report", timeout=20)
-        if rc == 0 or out:
-            self.get_clipboard().set(out)
-            self.say("Report copied. Paste it into your issue.")
-        else:
-            self.say("Couldn't build the report")
+    def on_lfe(self, scale):
+        """Bass-channel slider (dB added to the dedicated LFE channel of 5.1/7.1 content)."""
+        v = round(scale.get_value())
+        self._tune("LFE_DB", v, f"Bass channel +{v} dB")
+
+    def on_bass(self, scale):
+        """Bass-boost slider (dB of low shelf on everything in surround)."""
+        v = round(scale.get_value())
+        self._tune("BASS_DB", v, f"Bass boost +{v} dB")
+
+    def on_hrtf(self, row, _):
+        """Switch head-response set. tuxwell-hrtf downloads it if needed (checksum-verified) and restarts the service."""
+        n = row.get_selected()
+        if n == Gtk.INVALID_LIST_POSITION or n >= len(self.catalog):
+            return
+        sid, label = self.catalog[n][0], self.catalog[n][1]
+        self.say(f"Switching to {label} (downloads if needed)...")
+
+        def done(result):
+            rc, out = result
+            self.say(f"Now using {label}" if rc == 0 else f"Couldn't switch: {out.strip()[-80:]}")
+        bg(run, "tuxwell-hrtf", "use", sid, timeout=600, then=done)
+
+    def on_test(self, _btn):
+        """Play the test sound (noise bursts around the head) through the surround output."""
+        self.say("Playing the test sound")
+        bg(run, "tuxwell-test-sound", timeout=60)
 
     def on_eq(self, row, _):
+        """Headphone correction choice: index 0 is Off, then the catalog entries."""
         n = row.get_selected()
         if n == Gtk.INVALID_LIST_POSITION:
             return
         eq_id = "off" if n == 0 else self.eq_catalog[n - 1][0]
         self.save(EQ=eq_id)
         self.say("Correction off" if n == 0 else f"Correction: {self.eq_catalog[n - 1][1]}")
-        run("systemctl", "--user", "restart", "tuxwell.service")
+        self.restart_service()
 
-    def on_hrtf(self, row, _):
-        n = row.get_selected()
-        if n == Gtk.INVALID_LIST_POSITION or n >= len(self.catalog):
-            return
-        sid, label = self.catalog[n][0], self.catalog[n][1]
-        self.say(f"Switching to {label} (downloads if needed)...")
-        def work():
-            rc, out = run("tuxwell-hrtf", "use", sid, timeout=600)
-            GLib.idle_add(self.say, f"Now using {label}" if rc == 0 else f"Couldn't switch: {out.strip()[-80:]}")
-        threading.Thread(target=work, daemon=True).start()
+    # ------------------------------------------------------------------------------------------------------------------
+    # More tab
+    # ------------------------------------------------------------------------------------------------------------------
+    def on_hires(self, row, _):
+        """Hi-res switching on/off. Applied immediately (the service also applies it whenever the headset powers on)."""
+        on = row.get_active()
+        bg(run, "pw-metadata", "-n", "settings", "0", "clock.allowed-rates", f"[ {RATES_ON if on else '48000'} ]")
+        self.save(HIRES=int(on))
 
-    def on_test(self, _btn):
-        self.say("Playing the test sound")
-        threading.Thread(target=run, args=("tuxwell-test-sound",), kwargs={"timeout": 60}, daemon=True).start()
+    def on_mic(self, row, _):
+        """Hide or show the headset mic by switching the sound card profile."""
+        on = row.get_active()
 
-    def _tune(self, key, value, label):
         def apply():
-            self.save(**{key: value})
-            if self.conf.get("SURROUND_ENABLED") == "1":
-                threading.Thread(target=run, args=("systemctl", "--user", "restart", "tuxwell.service"), daemon=True).start()
-                self.say(f"{label} +{value:g} dB")
-        self.debounce(key, apply, 1200)
+            card = card_profile_name()
+            if card:
+                run("pactl", "set-card-profile", card, "output:iec958-stereo" if on else "output:iec958-stereo+input:mono-fallback")
+        bg(apply)
+        self.save(DISABLE_MIC=int(on))
 
-    def on_lfe(self, scale):
-        self._tune("LFE_DB", round(scale.get_value()), "Bass channel")
+    def open_url(self, url):
+        """Open a link in the default browser."""
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def on_bass(self, scale):
-        self._tune("BASS_DB", round(scale.get_value()), "Bass boost")
+    def on_copy_report(self, _btn):
+        """Copy the non-personal diagnostics (tuxwell-report) to the clipboard for pasting into a GitHub issue."""
+        def done(result):
+            rc, out = result
+            if rc == 0 or out:
+                self.get_clipboard().set(out)
+                self.say("Report copied. Paste it into your issue.")
+            else:
+                self.say("Couldn't build the report")
+        bg(run, "tuxwell-report", timeout=20, then=done)
 
-    def on_gain(self, scale):
-        v = round(scale.get_value(), 2)
-        def apply():
-            self.save(SURROUND_GAIN=v)
-            if self.conf.get("SURROUND_ENABLED") == "1":
-                threading.Thread(target=run, args=("systemctl", "--user", "restart", "tuxwell.service"), daemon=True).start()
-                self.say(f"Surround level {v:g}")
-        self.debounce("gain", apply, 1200)
-
-    def on_surround(self, row, _):
-        self.save(SURROUND_ENABLED=int(row.get_active()))
-        run("systemctl", "--user", "restart", "tuxwell.service")
-        self.say("Surround " + ("on" if row.get_active() else "off"))
-
-    # headset (maxwell_ctl)
+    # ------------------------------------------------------------------------------------------------------------------
+    # Headset tab (reads and writes the headset itself)
+    # ------------------------------------------------------------------------------------------------------------------
     def ctl(self):
+        """Path of audezeforlinux's maxwell_ctl.py as typed in the Setup box, if it exists, else None."""
         p = os.path.expanduser(self.r_path.get_text().strip())
         return p if p and os.path.isfile(p) else None
 
     def on_path(self, row):
+        """The Setup path was changed: remember it and re-read the headset."""
         self.save(CTL_PATH=row.get_text().strip())
         self.read_headset()
 
     def ctl_run(self, *args, then=None):
+        """Run maxwell_ctl.py with `args` in a worker thread; `then(rc, output)` is called on the main loop."""
         p = self.ctl()
         if not p:
             self.say("Set the path to maxwell_ctl.py first")
@@ -529,6 +668,7 @@ class Win(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _run_in_dir(self, p, *args):
+        """Run the tool from its own folder (it imports its sibling package). Never raises."""
         try:
             r = subprocess.run(["python3", p, "--plain", *args], capture_output=True, text=True,
                                timeout=30, cwd=os.path.dirname(p))
@@ -537,6 +677,7 @@ class Win(Adw.ApplicationWindow):
             return 1, str(e)
 
     def read_headset(self):
+        """Read battery, firmware, preset, sidetone and chat mix from the headset and show them. Needs audezeforlinux."""
         has = self.ctl() is not None
         for r in (self.r_preset, self.r_side, self.r_chat):
             r.set_sensitive(has)
@@ -570,6 +711,7 @@ class Win(Adw.ApplicationWindow):
         self.ctl_run("status", then=done)
 
     def on_preset(self, row, _):
+        """Send the chosen sound preset (see select_preset), then re-read the headset to confirm."""
         n = row.get_selected()
         if n == Gtk.INVALID_LIST_POSITION:
             return
@@ -580,15 +722,20 @@ class Win(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(2, lambda: (self.read_headset(), False)[1])
 
     def on_side(self, s):
+        """Sidetone slider (0 turns it off)."""
         v = int(s.get_value())
         self.debounce("side", lambda: self.ctl_run("sidetone", "off" if v == 0 else str(v)))
 
     def on_chat(self, s):
+        """Game/chat mix slider (0 = all game, 100 = all chat)."""
         v = int(s.get_value())
         self.debounce("chat", lambda: self.ctl_run("chatmix", str(v)))
 
 
-
+# ----------------------------------------------------------------------------------------------------------------------
+# Tray icon: a minimal StatusNotifierItem (SNI). GNOME needs a tray extension to show it; KDE shows it natively.
+# Two D-Bus objects are exported: the item itself (/StatusNotifierItem) and its menu (/MenuBar, com.canonical.dbusmenu).
+# ----------------------------------------------------------------------------------------------------------------------
 SNI_XML = """<node>
  <interface name="org.kde.StatusNotifierItem">
   <property name="Category" type="s" access="read"/>
@@ -609,6 +756,7 @@ SNI_XML = """<node>
   <signal name="NewIcon"/><signal name="NewStatus"><arg type="s"/></signal>
  </interface></node>"""
 
+# The tray menu uses the dbusmenu protocol. Only the calls a tray needs are implemented.
 MENU_XML = """<node>
  <interface name="com.canonical.dbusmenu">
   <property name="Version" type="u" access="read"/>
@@ -652,6 +800,7 @@ class Tray:
             print("tray unavailable:", e)
 
     def _registered(self, bus, res):
+        """Callback for RegisterStatusNotifierItem: ok means a tray is present; otherwise the app works without one."""
         try:
             bus.call_finish(res)
             self.ok = True
@@ -660,6 +809,7 @@ class Tray:
 
     # StatusNotifierItem
     def sni_get(self, conn, sender, path, iface, prop):
+        """D-Bus property getter for the tray item (title, icon name, menu path...)."""
         v = {"Category": ("s", "Hardware"), "Id": ("s", "tuxwell"), "Title": ("s", "Tuxwell"),
              "Status": ("s", "Active"), "WindowId": ("i", 0), "IconName": ("s", ICON_NAME),
              "IconThemePath": ("s", ""), "OverlayIconName": ("s", ""), "AttentionIconName": ("s", ""),
@@ -667,20 +817,24 @@ class Tray:
         return GLib.Variant(*v) if v else None
 
     def sni_call(self, conn, sender, path, iface, method, params, inv):
+        """D-Bus method handler: a left-click (Activate) shows or hides the window."""
         if method in ("Activate", "SecondaryActivate"):
             GLib.idle_add(self.on_toggle)
         inv.return_value(None)
 
     # dbusmenu
     def _item(self, i, label):
+        """One menu entry in the dbusmenu layout format (id, properties, children)."""
         return GLib.Variant("(ia{sv}av)", (i, {"label": GLib.Variant("s", label), "enabled": GLib.Variant("b", True),
                                               "visible": GLib.Variant("b", True)}, []))
 
     def menu_get(self, conn, sender, path, iface, prop):
+        """D-Bus property getter for the menu."""
         return {"Version": GLib.Variant("u", 3), "TextDirection": GLib.Variant("s", "ltr"),
                 "Status": GLib.Variant("s", "normal"), "IconThemePath": GLib.Variant("as", [])}.get(prop)
 
     def menu_call(self, conn, sender, path, iface, method, params, inv):
+        """D-Bus method handler for the menu: describe the entries, and act when one is clicked."""
         if method == "GetLayout":
             kids = [self._item(i, l) for i, l in self.items]
             root = (0, {"children-display": GLib.Variant("s", "submenu")}, kids)
@@ -715,6 +869,7 @@ class App(Adw.Application):
         self.win = None
 
     def do_activate(self):
+        """Called on first launch and every time the app is launched again: create the window once, then just show it."""
         win = self.win
         if win is None:
             win = self.win = Win(self)
@@ -725,12 +880,14 @@ class App(Adw.Application):
         win.present()
 
     def on_close(self, win):
+        """Closing the window hides it to the tray (when a tray exists) so the app keeps running."""
         if self.tray and self.tray.ok:
             win.set_visible(False)
             return True
         return False
 
     def toggle(self):
+        """Tray left-click: hide the window if it is in front, otherwise show it."""
         win = self.win
         if win:
             win.set_visible(False) if win.get_visible() and win.is_active() else win.present()

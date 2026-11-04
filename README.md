@@ -102,6 +102,19 @@ The surround sink is a PipeWire `filter-chain` with one `sofa` spatializer per s
 sudo rm -f /etc/udev/rules.d/70-audeze-maxwell.rules   # if you installed it
 ```
 
+## Documentation
+
+| | |
+|---|---|
+| [How it works](docs/ARCHITECTURE.md) | The pieces, the sound path, the service lifecycle, the one-volume model |
+| [Settings](docs/SETTINGS.md) | Every setting, its range and what it does |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Fixes for the common problems |
+| [Choosing a head response](docs/HRTF.md) | Finding the set that suits your ears |
+| [Headphone correction data](data/eq/README.md) | Where the corrections come from and how they were made |
+| [Presets](docs/PRESETS.md) | The headset's presets and the USB quirk behind them |
+| [Devices and distros](docs/DEVICES.md) | What is tested, what isn't, and how to help |
+| [Contributing](CONTRIBUTING.md) | Dev workflow, tests and style |
+
 ## Supported hardware
 
 | | Status |
