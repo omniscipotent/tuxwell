@@ -10,6 +10,7 @@ URL='https://zenodo.org/records/12092466/files/D1_HRIR_SOFA.zip?download=1'
 if [ "${1:-}" = "--uninstall" ]; then
   systemctl --user disable --now tuxwell.service 2>/dev/null || true
   rm -f ~/.local/bin/tuxwell ~/.local/bin/tuxwell-report ~/.local/bin/tuxwell-hrtf ~/.local/bin/tuxwell-render-surround ~/.local/bin/tuxwell-test-sound ~/.local/bin/tuxwell-gui ~/.local/share/applications/io.github.omniscipotent.Tuxwell.desktop ~/.config/systemd/user/tuxwell.service
+  rm -f ~/.local/share/icons/hicolor/*/apps/io.github.omniscipotent.Tuxwell.png
   systemctl --user daemon-reload
   echo "Removed. HRTF and $CFG/tuxwell.conf kept. udev rule: sudo rm /etc/udev/rules.d/70-audeze-maxwell.rules"; exit 0
 fi

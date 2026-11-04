@@ -19,7 +19,9 @@ LABEL = {"PK": "bq_peaking", "LSC": "bq_lowshelf", "LS": "bq_lowshelf", "HSC": "
 
 def parse_profile(path):
     filters = []
-    for line in open(path):
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    for line in lines:
         m = LINE.match(line.strip())
         if m:
             kind = m.group(1).upper()
@@ -80,13 +82,16 @@ def main():
     ap.add_argument("--target", required=True); ap.add_argument("--eq")
     ap.add_argument("--lfe-db", type=float, default=0.0); ap.add_argument("--bass-db", type=float, default=0.0)
     a = ap.parse_args()
-    s = open(a.template).read()
+    with open(a.template) as fh:
+        s = fh.read()
     s = s.replace("@HRTF@", a.hrtf).replace("@TARGET@", a.target)
     s = s.replace("@GAIN_FC@", fmt(a.gain * 10 ** (a.center_db / 20))).replace("@GAIN@", fmt(a.gain))
     nodes, links, out_l, out_r = [], [], "mixL:Out", "mixR:Out"
     if a.lfe_db:
-        s = s.replace("{ type = builtin label = copy  name = inLFE }",
-                      f'{{ type = builtin label = linear name = inLFE control = {{ "Mult" = {fmt(10 ** (a.lfe_db / 20))} "Add" = 0.0 }} }}')
+        lfe_node = "{ type = builtin label = copy  name = inLFE }"
+        if lfe_node not in s:
+            sys.exit("template has no LFE node to adjust (expected: " + lfe_node + ")")
+        s = s.replace(lfe_node, f'{{ type = builtin label = linear name = inLFE control = {{ "Mult" = {fmt(10 ** (a.lfe_db / 20))} "Add" = 0.0 }} }}')
     filters = parse_profile(a.eq) if a.eq else []
     if a.bass_db:
         filters = [("bq_lowshelf", 105.0, a.bass_db, 0.7)] + filters
