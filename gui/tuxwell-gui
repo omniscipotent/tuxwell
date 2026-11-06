@@ -314,7 +314,7 @@ class Win(Adw.ApplicationWindow):
             r.add_css_class("property")
             g.add(r)
         g = group(pg, "Output", "Where your sound goes")
-        self.s_auto = self.switch_row("Follow playback", "Surround while Plex HTPC plays, stereo again when it pauses. Your volume carries across.",
+        self.s_auto = self.switch_row("Follow playback", "Surround while Plex HTPC or Girens plays, stereo again when it pauses. Your volume carries across.",
                                       self.conf["AUTO_DEFAULT"] == "1", self.on_auto)
         g.add(self.s_auto)
         self.r_out = Adw.ComboRow(title="Choose it yourself", subtitle="Used when Follow playback is off",

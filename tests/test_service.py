@@ -29,6 +29,20 @@ def stream(idx, sink, corked, name, binary):
         """)
 
 
+def girens_stream(idx, sink, corked):
+    return textwrap.dedent(f"""\
+        Sink Input #{idx}
+        \tDriver: PipeWire
+        \tSink: {sink}
+        \tCorked: {corked}
+        \tProperties:
+        \t\tpipewire.access.portal.app_id = "nl.g4d.Girens"
+        \t\tapplication.name = "mpv"
+        \t\tapplication.process.binary = "python3.14"
+
+        """)
+
+
 def run_bash(script, conf=None, extra_env=None):
     """Source the service as a library, run `script`, return (stdout, list of recorded pactl calls)."""
     with tempfile.TemporaryDirectory() as d:
@@ -101,6 +115,9 @@ class Routing(unittest.TestCase):
         self.assertEqual(moves, ["move-sink-input 5 tuxwell_surround"])
         self.assertIn("moved stream 5", out)
 
+    def test_girens_stream_moves_to_surround(self):
+        self.assertEqual(self.route(girens_stream(5, 7, "no"), apps="Plex HTPC|nl.g4d.Girens")[1], ["move-sink-input 5 tuxwell_surround"])
+
     def test_leaves_stream_already_on_surround(self):
         self.assertEqual(self.route(stream(5, 9, "no", "Plex HTPC", "plex-bin"))[1], [])
 
@@ -133,6 +150,10 @@ class Playing(unittest.TestCase):
         # Plex's menu stream stays active while the video is paused: only the player's own stream counts.
         inputs = stream(5, 9, "yes", "Plex HTPC", "plex-bin") + stream(6, 9, "no", "Plex HTPC", "QtWebEngineProcess")
         self.assertEqual(self.playing(inputs), "NO")
+
+    def test_girens_playing_and_paused(self):
+        self.assertEqual(self.playing(girens_stream(5, 9, "no"), apps="plex-bin|nl.g4d.Girens"), "YES")
+        self.assertEqual(self.playing(girens_stream(5, 9, "yes"), apps="plex-bin|nl.g4d.Girens"), "NO")
 
     def test_no_streams(self):
         self.assertEqual(self.playing(""), "NO")

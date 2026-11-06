@@ -19,9 +19,9 @@ writes this file and restarts the service. You can also edit it by hand and run 
 | `BASS_DB` | `0` | 0 to 12 | Extra bass on everything in surround (a low shelf at 105 Hz). |
 | `HRTF` | `D1_48K_24bit_256tap_FIR_SOFA.sofa` | a `.sofa` file name | The head response in use. Change it with `tuxwell-hrtf use <id>` or in the app (never a path). |
 | `EQ` | `off` | `off` or a profile id | Headphone correction for the surround output, e.g. `maxwell2-neutral`. Ids are in `data/eq/catalog.tsv`. |
-| `SURROUND_APPS` | `tv.plex.PlexHTPC\|Plex HTPC` | letters, digits, space `.` `_` `\|` `-` | A regex matched against each audio stream's properties. Matching apps are played through surround. |
+| `SURROUND_APPS` | `tv.plex.PlexHTPC\|Plex HTPC\|nl.g4d.Girens` | letters, digits, space `.` `_` `\|` `-` | A regex matched against each audio stream's properties. Matching apps are played through surround. |
 | `AUTO_DEFAULT` | `1` | `0` / `1` | Make the default output follow playback: surround while the player plays, stereo when it pauses. |
-| `PLAYING_APPS` | `plex-bin` | same characters as `SURROUND_APPS` | Regex for the player's *own* stream. Its menu/UI sounds must not count as playing. |
+| `PLAYING_APPS` | `plex-bin\|nl.g4d.Girens` | same characters as `SURROUND_APPS` | Regex for the player's *own* stream. Its menu/UI sounds must not count as playing. |
 | `CTL_PATH` | *(empty)* | a file path | App only: where audezeforlinux's `maxwell_ctl.py` is, for the Headset tab. Empty means the default folder. |
 
 ## Finding an app's identifiers
