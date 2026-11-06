@@ -19,7 +19,7 @@
 - Watch what the service does: `journalctl --user -u tuxwell -f` prints a line each time it moves a stream.
 
 ## The output doesn't switch when I pause
-- **Follow playback** must be on (Listen tab), and `PLAYING_APPS` must match the player's own stream (for Plex HTPC it is `plex-bin`, for Girens its Flatpak id `nl.g4d.Girens`).
+- **Follow playback** must be on (Listen tab), and `PLAYING_APPS` must match the player's own stream (for Plex Desktop and Plex HTPC it is `plex-bin`).
 - Switching back to stereo waits a few seconds on purpose, so changing episode doesn't flip it back and forth.
 
 ## The sound preset / sidetone / chat mix don't work

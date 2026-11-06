@@ -26,7 +26,7 @@ and does it only while the headset is powered on. Turn the headphones off and ev
 | **Hi-res audio** | Lets PipeWire switch the dongle between 48 and 96 kHz, 24-bit, to match what plays (the dongle has no 44.1 kHz mode, so 44.1 material is converted to 48). It only switches when nothing else is playing at the old rate. |
 | **Virtual 7.1 surround** | A *Tuxwell Surround (7.1)* output that renders 5.1/7.1 to your headphones using the SADIE II HRTF. |
 | **Your own head response** | 20 openly licensed measured heads (SADIE II) you can try from the app, with a test sound that circles around you. Everyone's ears differ, so the right one matters. See [docs/HRTF.md](docs/HRTF.md). |
-| **Per-app surround** | Chosen apps (Plex HTPC and Girens by default) go to surround automatically, and the default output follows playback: surround while Plex plays, stereo when you pause, with one volume across both. |
+| **Per-app surround** | Chosen apps (Plex Desktop and Plex HTPC by default) go to surround automatically, and the default output follows playback: surround while Plex plays, stereo when you pause, with one volume across both. |
 | **Mic out of the way** | Optional playback-only profile, so the headset mic never gets picked as an input by mistake. |
 | **Follows the headset** | Detects the headset powering on and off, even with the dongle always plugged in. |
 | **Headphone correction** | Optional EQ that evens out the Maxwell's own sound so surround is more accurate. For the **Maxwell 2** it is generated from a published lab measurement (not guessed); off by default. See [data/eq/README.md](data/eq/README.md). |
@@ -79,10 +79,10 @@ These live inside the headset and need two things:
 | `SURROUND_GAIN` | `0.27` | Level of the surround mix (also a slider in the app). 0.27 was measured to make centred stereo exactly as loud through surround as through the stereo output. |
 | `CENTER_DB` | `3` | Extra dB on the centre channel so 5.1 dialogue matches a stereo downmix. |
 | `AUTO_DEFAULT` | `1` | The default output follows playback: surround while `PLAYING_APPS` plays, stereo when it pauses. Your volume is carried across each switch. |
-| `PLAYING_APPS` | `plex-bin\|nl.g4d.Girens` | Regex for the player's own audio stream (not its menu sounds). |
-| `SURROUND_APPS` | `tv.plex.PlexHTPC\|Plex HTPC\|nl.g4d.Girens` | Regex matched against each audio stream's properties. These apps play through surround. |
+| `PLAYING_APPS` | `plex-bin` | Regex for the player's own audio stream (not its menu sounds). |
+| `SURROUND_APPS` | `tv.plex.PlexDesktop\|tv.plex.PlexHTPC\|Plex HTPC` | Regex matched against each audio stream's properties. These apps play through surround. |
 
-In Plex HTPC, set the audio speaker layout to 7.1 so it sends surround into the sink. Girens plays through mpv and is matched by its Flatpak id (`nl.g4d.Girens`).
+In Plex Desktop or Plex HTPC, set the audio speaker layout to 7.1 so it sends surround into the sink. Plex Desktop is matched by its Flatpak id (`tv.plex.PlexDesktop`) and its player stream is `plex-bin`.
 Find another app's identifiers with `pactl list sink-inputs` while it plays.
 
 ## How it works

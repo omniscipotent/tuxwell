@@ -6,7 +6,7 @@
 #     - sets the dongle's hardware volume and hides the headset microphone
 #     - lets PipeWire switch between 48 and 96 kHz
 #     - starts the virtual 7.1 surround output as a separate PipeWire client (never restarts PipeWire itself)
-#     - sends chosen apps (SURROUND_APPS, Plex HTPC and Girens by default) to that surround output
+#     - sends chosen apps (SURROUND_APPS, Plex Desktop and Plex HTPC by default) to that surround output
 #     - makes the default output follow playback: surround while the player plays, stereo when it pauses
 #
 # How it knows the headset is on
@@ -46,9 +46,9 @@ LFE_DB=10                 # lift for the bass (LFE) channel of 5.1/7.1 content; 
 BASS_DB=0                 # extra bass on everything in surround (low shelf at 105 Hz)
 HRTF=$DEFAULT_HRTF        # head-response file in $DATA_ROOT/hrtf (change with tuxwell-hrtf)
 EQ=off                    # headphone correction: "off", or a profile id from data/eq/catalog.tsv
-SURROUND_APPS='tv.plex.PlexHTPC|Plex HTPC|nl.g4d.Girens'   # regex matched against each stream's properties: these apps get surround
+SURROUND_APPS='tv.plex.PlexDesktop|tv.plex.PlexHTPC|Plex HTPC'   # regex matched against each stream's properties: these apps get surround
 AUTO_DEFAULT=1            # 1 = the default output follows playback
-PLAYING_APPS='plex-bin|nl.g4d.Girens'   # regex for the player's own audio stream (its menu/UI sounds must not count as "playing")
+PLAYING_APPS='plex-bin'   # regex for the player's own audio stream (its menu/UI sounds must not count as "playing")
 
 # Runtime state (not settings)
 present=0                 # 1 while we consider the headset connected and have applied our settings

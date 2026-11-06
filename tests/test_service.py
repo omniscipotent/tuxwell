@@ -29,16 +29,16 @@ def stream(idx, sink, corked, name, binary):
         """)
 
 
-def girens_stream(idx, sink, corked):
+def plex_desktop_stream(idx, sink, corked):
     return textwrap.dedent(f"""\
         Sink Input #{idx}
         \tDriver: PipeWire
         \tSink: {sink}
         \tCorked: {corked}
         \tProperties:
-        \t\tpipewire.access.portal.app_id = "nl.g4d.Girens"
-        \t\tapplication.name = "mpv"
-        \t\tapplication.process.binary = "python3.14"
+        \t\tpipewire.access.portal.app_id = "tv.plex.PlexDesktop"
+        \t\tapplication.name = "Plex"
+        \t\tapplication.process.binary = "plex-bin"
 
         """)
 
@@ -115,8 +115,8 @@ class Routing(unittest.TestCase):
         self.assertEqual(moves, ["move-sink-input 5 tuxwell_surround"])
         self.assertIn("moved stream 5", out)
 
-    def test_girens_stream_moves_to_surround(self):
-        self.assertEqual(self.route(girens_stream(5, 7, "no"), apps="Plex HTPC|nl.g4d.Girens")[1], ["move-sink-input 5 tuxwell_surround"])
+    def test_plex_desktop_stream_moves_to_surround(self):
+        self.assertEqual(self.route(plex_desktop_stream(5, 7, "no"), apps="tv.plex.PlexDesktop|Plex HTPC")[1], ["move-sink-input 5 tuxwell_surround"])
 
     def test_leaves_stream_already_on_surround(self):
         self.assertEqual(self.route(stream(5, 9, "no", "Plex HTPC", "plex-bin"))[1], [])
@@ -151,9 +151,9 @@ class Playing(unittest.TestCase):
         inputs = stream(5, 9, "yes", "Plex HTPC", "plex-bin") + stream(6, 9, "no", "Plex HTPC", "QtWebEngineProcess")
         self.assertEqual(self.playing(inputs), "NO")
 
-    def test_girens_playing_and_paused(self):
-        self.assertEqual(self.playing(girens_stream(5, 9, "no"), apps="plex-bin|nl.g4d.Girens"), "YES")
-        self.assertEqual(self.playing(girens_stream(5, 9, "yes"), apps="plex-bin|nl.g4d.Girens"), "NO")
+    def test_plex_desktop_playing_and_paused(self):
+        self.assertEqual(self.playing(plex_desktop_stream(5, 9, "no")), "YES")
+        self.assertEqual(self.playing(plex_desktop_stream(5, 9, "yes")), "NO")
 
     def test_no_streams(self):
         self.assertEqual(self.playing(""), "NO")
